@@ -82,10 +82,21 @@ type MachineConfiguration struct {
 	Volumes            []Volume
 }
 
+type State string
+
+const (
+	Starting   State = "starting"
+	Stopping   State = "stopping"
+	Restarting State = "restarting"
+	Running    State = "running"
+	Stopped    State = "stopped"
+)
+
 type Driver interface {
 	Start() error
 	Stop() error
 	Reboot() error
+	GetState() State
 	Scale(cpuCount uint32, memory uint64, disk uint64) error
 	AttachNetworkInterface(net NetworkInterface) error
 	DetachNetworkInterface(id uuid.UUID) error
@@ -481,4 +492,15 @@ func (d *driver) AttachVolume(volume Volume) error {
 func (d *driver) DetachVolume(id uuid.UUID) error {
 	//TODO implement me
 	panic("implement me")
+}
+
+func (d *driver) GetState() State {
+	// TODO: proper state logic
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.qemuPidFd == -1 {
+		return Stopped
+	} else {
+		return Running
+	}
 }
