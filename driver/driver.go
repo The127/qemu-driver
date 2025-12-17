@@ -438,8 +438,17 @@ func (d *driver) filePath(name string) string {
 }
 
 func (d *driver) Stop() error {
-	//TODO implement me
-	panic("implement me")
+	mon, err := d.connectMonitor()
+	if err != nil {
+		return err
+	}
+
+	err = mon.Quit()
+	if err != nil {
+		return fmt.Errorf("stopping VM: %w", err)
+	}
+
+	return nil
 }
 
 func (d *driver) Reboot() error {

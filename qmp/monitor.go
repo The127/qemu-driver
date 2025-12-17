@@ -12,6 +12,7 @@ type Monitor interface {
 	AddDevice(device map[string]any) error
 	AddBlockDevice(blockDev map[string]any) error
 	Continue() error
+	Quit() error
 }
 
 type monitor struct {
@@ -68,4 +69,8 @@ func (m *monitor) AddBlockDevice(blockDev map[string]any) error {
 
 func (m *monitor) Continue() error {
 	return m.runCommand("cont", nil)
+}
+
+func (m *monitor) Quit() error {
+	return m.runCommand("quit", nil)
 }
