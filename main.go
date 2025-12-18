@@ -1,9 +1,10 @@
 package main
 
 import (
-	"github.com/gwenya/qemu-driver/driver"
 	"os"
 	"path"
+
+	"github.com/gwenya/qemu-driver/driver"
 
 	"github.com/google/uuid"
 )
@@ -29,8 +30,8 @@ func main() {
 		FirmwareSourcePath: firmwareSource,
 		NvramSourcePath:    nvramSource,
 		CpuCount:           1,
-		MemoryMB:           1024,
-		DiskGB:             10,
+		MemorySize:         1024,
+		DiskSize:           10,
 		NetworkInterfaces:  nil,
 		Volumes:            nil,
 	})

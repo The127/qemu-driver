@@ -154,17 +154,19 @@ func (d *Description) BuildConfig() (config.MachineConfig, []devices.HotplugDevi
 
 	pcieAllocations := d.pcie.Allocate()
 	for _, allocation := range pcieAllocations {
-		hotplugDevices = append(hotplugDevices, allocation.Device.GetHotplugs()...)
-
-		sections := allocation.Device.Config(pcie.BusAllocation{
+		pciAlloc := pcie.BusAllocation{
 			Bus:           allocation.Bus,
 			Address:       allocation.Addr,
 			Multifunction: allocation.Multifunction,
-		})
+		}
+
+		sections := allocation.Device.Config(pciAlloc)
 
 		for _, section := range sections {
 			cfg.AddSection(section)
 		}
+
+		hotplugDevices = append(hotplugDevices, allocation.Device.GetHotplugs(pciAlloc)...)
 	}
 
 	if d.firmwarePath != "" {

@@ -2,10 +2,11 @@ package pcie
 
 import (
 	"fmt"
+	"maps"
+
 	"github.com/gwenya/qemu-driver/config"
 	"github.com/gwenya/qemu-driver/devices"
 	"github.com/gwenya/qemu-driver/qmp"
-	"maps"
 )
 
 type BusAllocation struct {
@@ -16,7 +17,7 @@ type BusAllocation struct {
 
 type BusDevice interface {
 	Config(alloc BusAllocation) []config.Section
-	devices.HotplugDevice
+	GetHotplugs(alloc BusAllocation) []devices.HotplugDevice
 }
 
 func busDeviceConfigSection(alloc BusAllocation, id string, driver string, extraConfig map[string]string) config.Section {
@@ -42,14 +43,31 @@ func busDeviceConfigSection(alloc BusAllocation, id string, driver string, extra
 
 type noHotPlug struct{}
 
-func (*noHotPlug) GetHotplugs() []devices.HotplugDevice {
+func (*noHotPlug) GetHotplugs(_ BusAllocation) []devices.HotplugDevice {
 	return nil
 }
 
-func (*noHotPlug) Plug(m qmp.Monitor) error {
-	return NoHotplugError
+type wrappedHotpluggable interface {
+	Plug(m qmp.Monitor, alloc BusAllocation) error
+	Unplug(m qmp.Monitor, alloc BusAllocation) error
 }
 
-func (*noHotPlug) Unplug(m qmp.Monitor) error {
-	return NoHotplugError
+func hotplugWrap(device wrappedHotpluggable, allocation BusAllocation) devices.HotplugDevice {
+	return &hotplugWrapper{
+		wrapped:    device,
+		allocation: allocation,
+	}
+}
+
+type hotplugWrapper struct {
+	wrapped    wrappedHotpluggable
+	allocation BusAllocation
+}
+
+func (h *hotplugWrapper) Plug(m qmp.Monitor) error {
+	return h.wrapped.Plug(m, h.allocation)
+}
+
+func (h *hotplugWrapper) Unplug(m qmp.Monitor) error {
+	return h.wrapped.Unplug(m, h.allocation)
 }

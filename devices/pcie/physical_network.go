@@ -16,22 +16,22 @@ func NewPhysicalNetworkDevice(id string, netdevName string) BusDevice {
 	}
 }
 
-func (d *physicalNetworkDevice) Config(BusAllocation) []config.Section {
+func (d *physicalNetworkDevice) Config(_ BusAllocation) []config.Section {
 	return nil
 }
 
-func (d *physicalNetworkDevice) GetHotplugs() []devices.HotplugDevice {
+func (d *physicalNetworkDevice) GetHotplugs(alloc BusAllocation) []devices.HotplugDevice {
 	return []devices.HotplugDevice{
-		d,
+		hotplugWrap(d, alloc),
 	}
 }
 
-func (d *physicalNetworkDevice) Plug(m qmp.Monitor) error {
+func (d *physicalNetworkDevice) Plug(m qmp.Monitor, alloc BusAllocation) error {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (d *physicalNetworkDevice) Unplug(m qmp.Monitor) error {
+func (d *physicalNetworkDevice) Unplug(m qmp.Monitor, alloc BusAllocation) error {
 	//TODO implement me
 	panic("implement me")
 }

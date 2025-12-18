@@ -4,7 +4,6 @@ import (
 	"github.com/gwenya/qemu-driver/config"
 	"github.com/gwenya/qemu-driver/devices"
 	"github.com/gwenya/qemu-driver/devices/storage"
-	"github.com/gwenya/qemu-driver/qmp"
 )
 
 type scsiController struct {
@@ -30,21 +29,13 @@ func (s *scsiController) Config(alloc BusAllocation) []config.Section {
 	}
 }
 
-func (s *scsiController) GetHotplugs() []devices.HotplugDevice {
+func (s *scsiController) GetHotplugs(alloc BusAllocation) []devices.HotplugDevice {
 	var devs []devices.HotplugDevice
 	for _, disk := range s.disks {
-		devs = append(devs, disk.GetHotplugs()...)
+		devs = append(devs, disk.GetScsiHotplug(s.id+".0"))
 	}
 
 	return devs
-}
-
-func (s *scsiController) Plug(q qmp.Monitor) error {
-	panic("not supported")
-}
-
-func (*scsiController) Unplug(q qmp.Monitor) error {
-	panic("not supported")
 }
 
 func (s *scsiController) AddDisk(disk storage.ScsiDrive) {

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+
 	"github.com/gwenya/qemu-driver/config"
 	"github.com/gwenya/qemu-driver/devices"
 	"github.com/gwenya/qemu-driver/qmp"
@@ -28,11 +29,11 @@ func (d *imageDrive) Config() []config.Section {
 	return nil
 }
 
-func (d *imageDrive) GetHotplugs() []devices.HotplugDevice {
-	return []devices.HotplugDevice{d}
+func (d *imageDrive) GetScsiHotplug(bus string) devices.HotplugDevice {
+	return wrapScsiHotplug(d, bus)
 }
 
-func (d *imageDrive) Plug(m qmp.Monitor) error {
+func (d *imageDrive) Plug(m qmp.Monitor, bus string) error {
 	nodeName := "node-" + d.id
 
 	err := m.AddBlockDevice(map[string]any{
@@ -71,6 +72,6 @@ func (d *imageDrive) Plug(m qmp.Monitor) error {
 	return nil
 }
 
-func (d *imageDrive) Unplug(m qmp.Monitor) error {
+func (d *imageDrive) Unplug(m qmp.Monitor, bus string) error {
 	panic("implement me")
 }
