@@ -415,8 +415,13 @@ func (d *driver) postStartConfig(devices []devices.HotplugDevice) error {
 
 func (d *driver) connectMonitor() (qmp.Monitor, error) {
 	if d.mon != nil {
-		// TODO: check if the monitor was disconnected, by pinging or something, reconnect if necessary
-		return d.mon, nil
+		_, err := d.mon.Status()
+		if err == nil {
+			return d.mon, nil
+		}
+
+		fmt.Println("connection to qmp socket is broken, reconnecting")
+		_ = d.mon.Disconnect()
 	}
 
 	var mon qmp.Monitor
@@ -504,7 +509,7 @@ func (d *driver) GetState() Status {
 	if d.qemuPidFd == -1 {
 		isCreated, err := util.FileExists(d.filePath(CreatedFlagFileName))
 		if err != nil {
-			fmt.Printf("failed to check creation flag existence: %v", err)
+			fmt.Printf("failed to check creation flag existence: %v\n", err)
 			return Unknown
 		}
 		if isCreated {
@@ -513,6 +518,18 @@ func (d *driver) GetState() Status {
 			return Uninitialized
 		}
 	} else {
-		return Running
+		mon, err := d.connectMonitor()
+		if err != nil {
+			fmt.Printf("failed to connect qmp monitor: %v\n", err)
+			return Unknown
+		}
+
+		qemuStatus, err := mon.Status()
+		if err != nil {
+			fmt.Printf("failed to query qemu status: %v\n", err)
+			return Unknown
+		}
+
+		return mapQemuStatus(qemuStatus)
 	}
 }

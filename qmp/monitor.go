@@ -15,6 +15,7 @@ type Monitor interface {
 	Quit() error
 
 	Disconnect() error
+	Status() (RunState, error)
 }
 
 type monitor struct {
@@ -40,6 +41,15 @@ func Connect(qmpSocketPath string) (Monitor, error) {
 }
 
 func (m *monitor) runCommand(command string, args map[string]any) error {
+	err := m.runCommandsWithResponse(command, args, nil)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *monitor) runCommandsWithResponse(command string, args map[string]any, resp any) error {
 	cmd := map[string]any{
 		"execute": command,
 	}
@@ -53,7 +63,16 @@ func (m *monitor) runCommand(command string, args map[string]any) error {
 		return err
 	}
 
-	_, err = m.q.Run(jsonBytes)
+	respBytes, err := m.q.Run(jsonBytes)
+	if err != nil {
+		return err
+	}
+
+	if resp == nil {
+		return nil
+	}
+
+	err = json.Unmarshal(respBytes, resp)
 	if err != nil {
 		return err
 	}
@@ -84,4 +103,19 @@ func (m *monitor) Disconnect() error {
 	}
 
 	return nil
+}
+
+func (m *monitor) Status() (RunState, error) {
+	var resp struct {
+		Return struct {
+			Status RunState `json:"status"`
+		} `json:"return"`
+	}
+
+	err := m.runCommandsWithResponse("query-status", nil, &resp)
+	if err != nil {
+		return "", err
+	}
+
+	return resp.Return.Status, nil
 }
