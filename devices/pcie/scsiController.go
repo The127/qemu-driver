@@ -7,6 +7,7 @@ import (
 )
 
 type scsiController struct {
+	noHotPlug
 	id    string
 	disks []storage.ScsiDrive
 }

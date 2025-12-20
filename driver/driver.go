@@ -28,7 +28,7 @@ import (
 const (
 	QemuPidFileName       = "qemu.pid"
 	QemuQmpSocketFileName = "qmp.sock"
-	RootDiskFileName      = "rootdisk.qcow2"
+	RootDiskFileName      = "rootdisk.img"
 	ConfigFileName        = "qemu.conf"
 	QemuStdErrFileName    = "stderr.log"
 	QemuStdOutFileName    = "stdout.log"
@@ -211,7 +211,7 @@ func (d *driver) Create() error {
 	cmd := exec.Command("qemu-img", "convert", "-f", "qcow2", "-O", "raw", d.config.ImageSourcePath, rootDiskPath)
 	err = cmd.Run()
 	if err != nil {
-		return fmt.Errorf("converting image: %w", err)
+		return fmt.Errorf("converting image (%s): %w", cmd, err)
 	}
 
 	var diskKiB uint64
@@ -222,10 +222,10 @@ func (d *driver) Create() error {
 		diskKiB = d.config.DiskSize / 1024
 	}
 
-	cmd = exec.Command("qemu-img", "resize", rootDiskPath, fmt.Sprintf("%dK", diskKiB))
+	cmd = exec.Command("qemu-img", "resize", "-f", "raw", rootDiskPath, fmt.Sprintf("%dK", diskKiB))
 	err = cmd.Run()
 	if err != nil {
-		return fmt.Errorf("resizing image: %w", err)
+		return fmt.Errorf("resizing image (%s): %w", cmd, err)
 	}
 
 	firmwarePath := d.filePath(FirmwareFileName)
@@ -292,6 +292,13 @@ func (d *driver) Start() error {
 
 	desc.Monitor(d.filePath(QemuQmpSocketFileName))
 
+	desc.Pcie().AddDevice(pcie.NewBalloon("balloon"))
+	desc.Pcie().AddDevice(pcie.NewKeyboard("keyboard"))
+	desc.Pcie().AddDevice(pcie.NewTablet("tablet"))
+	desc.Pcie().AddDevice(pcie.NewVga("vga", pcie.StdVga))
+
+	desc.AddChardev(chardev.NewStdio("console", true)) // TODO: actually want a ringbuf here, but this is easier for debugging
+
 	desc.Scsi().AddDisk(storage.NewImageDrive("rootdisk", d.filePath(RootDiskFileName)))
 
 	for _, volume := range d.config.Volumes {
@@ -304,19 +311,13 @@ func (d *driver) Start() error {
 
 	for _, networkInterface := range d.config.NetworkInterfaces {
 		switch n := networkInterface.(type) {
-		case TapNetworkInterface:
-			desc.Pcie().AddDevice(pcie.NewTapNetworkDevice("tap-"+n.Id.String(), n.Name, int(d.config.CpuCount)))
-		case PhysicalNetworkInterface:
-			desc.Pcie().AddDevice(pcie.NewPhysicalNetworkDevice("phys-"+n.Id.String(), n.Name))
+		case tapNetworkInterface:
+			desc.Pcie().AddDevice(pcie.NewTapNetworkDevice("tap-"+n.name, n.name, n.macAddress))
+		case physicalNetworkInterface:
+			panic("not supported")
+			//desc.Pcie().AddDevice(pcie.NewPhysicalNetworkDevice("phys-"+n.Id.String(), n.Name))
 		}
 	}
-
-	desc.Pcie().AddDevice(pcie.NewBalloon("balloon"))
-	desc.Pcie().AddDevice(pcie.NewKeyboard("keyboard"))
-	desc.Pcie().AddDevice(pcie.NewTablet("tablet"))
-	desc.Pcie().AddDevice(pcie.NewVga("vga", pcie.StdVga))
-
-	desc.AddChardev(chardev.NewStdio("console", true)) // TODO: actually want a ringbuf here, but this is easier for debugging
 
 	config, hotplugDevices := desc.BuildConfig()
 
@@ -369,7 +370,7 @@ func (d *driver) Start() error {
 
 	err = cmd.Start()
 	if err != nil {
-		return fmt.Errorf("starting qemu process: %w", err)
+		return fmt.Errorf("starting qemu process (%s): %w", cmd, err)
 	}
 
 	d.qemuPidFd = pidfd

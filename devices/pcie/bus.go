@@ -2,6 +2,7 @@ package pcie
 
 import (
 	"fmt"
+
 	"github.com/gwenya/qemu-driver/config"
 	"github.com/gwenya/qemu-driver/devices"
 )
@@ -11,10 +12,10 @@ type Bus interface {
 }
 
 func NewAllocator() Allocator {
-	return &allocator{}
+	return &busAllocator{}
 }
 
-type allocator struct {
+type busAllocator struct {
 	devices.BusImpl[BusDevice]
 }
 
@@ -34,57 +35,82 @@ func (p *rootPort) Config(alloc BusAllocation) []config.Section {
 
 type RootPort interface{}
 
-func newRootPort(id string, index int) BusDevice {
-	return &rootPort{
-		id:    id,
-		index: index,
-	}
-}
+func (r *busAllocator) Allocate() []Allocation {
+	hotplugDevices := make([]BusDevice, 0, len(r.Devices))
+	noHotplugDevices := make([]BusDevice, 0, len(r.Devices))
 
-func (r *allocator) Allocate() []Allocation {
-	// for now we don't care about the order or how much space they take up
-	// but later we want to allocate multiple devices into one port via multi-function devices to save limited pcie space
-	// and also we maybe to sort them in some way so that network devices always get the same address and therefore same predictable interface cid
-	// or at least the main network device should be like that
+	for _, device := range r.Devices {
+		if device.IsHotplug() {
+			hotplugDevices = append(hotplugDevices, device)
+		} else {
+			noHotplugDevices = append(noHotplugDevices, device)
+		}
+	}
+
+	rootBus := "pcie.0"
 
 	allocations := make([]Allocation, 0, len(r.Devices))
 
-	port := 0
-	fn := 0
-	bridgeDev := 1 // address 0 is used by the DRAM controller
-	bridgeFn := 0
+	i := 64 // first pcie slot (8 functions * 8 functions) is used by DRAM controller
 
-	for _, device := range r.Devices {
-		portName := fmt.Sprintf("qemu_pcie%d", port)
-		if fn == 0 {
+	for _, device := range noHotplugDevices {
+		portNum := i / 8
+		portName := fmt.Sprintf("pcie_port_%d", portNum)
+		deviceFn := i % 8
+
+		if deviceFn == 0 {
+			port := portNum / 8
+			portFn := portNum % 8
 			allocations = append(allocations, Allocation{
-				Device:        newRootPort(portName, port),
-				Bus:           "pcie.0",
-				Addr:          fmt.Sprintf("%x.%d", bridgeDev, bridgeFn),
-				Multifunction: bridgeFn == 0,
+				Device: &rootPort{
+					id:    portName,
+					index: portNum,
+				},
+				Bus:           rootBus,
+				Addr:          fmt.Sprintf("%x.%d", port, portFn),
+				Multifunction: portFn == 0,
 			})
-
-			if bridgeFn == 7 {
-				bridgeDev++
-				bridgeFn = 0
-			} else {
-				bridgeFn++
-			}
-
 		}
 
 		allocations = append(allocations, Allocation{
 			Device:        device,
 			Bus:           portName,
-			Addr:          fmt.Sprintf("00.%d", fn),
-			Multifunction: fn == 0,
+			Addr:          fmt.Sprintf("00.%d", deviceFn),
+			Multifunction: deviceFn == 0,
 		})
 
-		if fn == 7 {
-			fn = 0
-		} else {
-			fn++
-		}
+		i += 1
+	}
+
+	if i%8 != 0 { // if
+		i += 8 - (i % 8)
+	}
+
+	for _, device := range hotplugDevices {
+		portNum := i / 8
+		portName := fmt.Sprintf("pcie_port_%d", portNum)
+		deviceFn := i % 8
+
+		port := portNum / 8
+		portFn := portNum % 8
+		allocations = append(allocations, Allocation{
+			Device: &rootPort{
+				id:    portName,
+				index: portNum,
+			},
+			Bus:           rootBus,
+			Addr:          fmt.Sprintf("%x.%d", port, portFn),
+			Multifunction: portFn == 0,
+		})
+
+		allocations = append(allocations, Allocation{
+			Device:        device,
+			Bus:           portName,
+			Addr:          fmt.Sprintf("00.%d", deviceFn),
+			Multifunction: false,
+		})
+
+		i += 8
 	}
 
 	return allocations

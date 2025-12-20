@@ -16,6 +16,7 @@ type BusAllocation struct {
 }
 
 type BusDevice interface {
+	IsHotplug() bool
 	Config(alloc BusAllocation) []config.Section
 	GetHotplugs(alloc BusAllocation) []devices.HotplugDevice
 }
@@ -43,8 +44,18 @@ func busDeviceConfigSection(alloc BusAllocation, id string, driver string, extra
 
 type noHotPlug struct{}
 
+func (*noHotPlug) IsHotplug() bool {
+	return false
+}
+
 func (*noHotPlug) GetHotplugs(_ BusAllocation) []devices.HotplugDevice {
 	return nil
+}
+
+type hotPlug struct{}
+
+func (*hotPlug) IsHotplug() bool {
+	return true
 }
 
 type wrappedHotpluggable interface {

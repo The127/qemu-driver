@@ -1,6 +1,8 @@
 package main
 
 import (
+	"math/rand"
+	"net"
 	"os"
 	"path"
 
@@ -14,13 +16,22 @@ func main() {
 
 	storagePath := path.Join("/tmp", id.String())
 
-	imageSource := "/var/home/gwen/Downloads/Arch-Linux-x86_64-cloudimg-20251201.460866.qcow2"
+	imageSource := "/var/home/gwen/Downloads/Arch-Linux-x86_64-basic.qcow2"
 	firmwareSource := "/usr/share/edk2/ovmf/OVMF_CODE.fd"
 	nvramSource := "/usr/share/edk2/ovmf/OVMF_VARS.fd"
 
 	err := os.MkdirAll(storagePath, os.ModePerm)
 	if err != nil {
 		panic(err)
+	}
+
+	hwaddr := net.HardwareAddr{
+		(byte(rand.Int31n(256)) & ^byte(0b1)) | byte(0b10),
+		byte(rand.Int31n(256)),
+		byte(rand.Int31n(256)),
+		byte(rand.Int31n(256)),
+		byte(rand.Int31n(256)),
+		byte(rand.Int31n(256)),
 	}
 
 	d, err := driver.New(driver.MachineConfiguration{
@@ -30,17 +41,22 @@ func main() {
 		FirmwareSourcePath: firmwareSource,
 		NvramSourcePath:    nvramSource,
 		CpuCount:           1,
-		MemorySize:         1024,
-		DiskSize:           10,
-		NetworkInterfaces:  nil,
-		Volumes:            nil,
+		MemorySize:         1024 * 1024 * 1024,
+		DiskSize:           50_000_000_000,
+		NetworkInterfaces: []driver.NetworkInterface{
+			driver.NewTapNetworkInterface("test-tap", hwaddr),
+		},
+		Volumes: nil,
 	})
 
 	if err != nil {
 		panic(err)
 	}
 
-	_ = d
+	err = d.Create()
+	if err != nil {
+		panic(err)
+	}
 
 	err = d.Start()
 	if err != nil {

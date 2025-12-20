@@ -3,6 +3,7 @@ package qmp
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/digitalocean/go-qemu/qmp"
@@ -11,15 +12,18 @@ import (
 type Monitor interface {
 	AddDevice(device map[string]any) error
 	AddBlockDevice(blockDev map[string]any) error
+	AddNetworkDevice(netDev map[string]any) error
 	Continue() error
 	Quit() error
-
 	Disconnect() error
 	Status() (RunState, error)
+	QueryCPUs() ([]CpuInfo, error)
+	SendFd(name string, fd *os.File) error
+	CloseFd(name string) error
 }
 
 type monitor struct {
-	q qmp.Monitor
+	q *qmp.SocketMonitor
 }
 
 func Connect(qmpSocketPath string) (Monitor, error) {
@@ -40,16 +44,7 @@ func Connect(qmpSocketPath string) (Monitor, error) {
 	}, nil
 }
 
-func (m *monitor) runCommand(command string, args map[string]any) error {
-	err := m.runCommandsWithResponse(command, args, nil)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (m *monitor) runCommandsWithResponse(command string, args map[string]any, resp any) error {
+func serializeCommand(command string, args map[string]any) ([]byte, error) {
 	cmd := map[string]any{
 		"execute": command,
 	}
@@ -58,12 +53,46 @@ func (m *monitor) runCommandsWithResponse(command string, args map[string]any, r
 		cmd["arguments"] = args
 	}
 
-	jsonBytes, err := json.Marshal(cmd)
+	return json.Marshal(cmd)
+}
+
+func (m *monitor) runCommand(command string, args map[string]any) error {
+	cmd, err := serializeCommand(command, args)
 	if err != nil {
 		return err
 	}
 
-	respBytes, err := m.q.Run(jsonBytes)
+	fmt.Printf("running command %s\n", string(cmd))
+
+	_, err = m.q.Run(cmd)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *monitor) runCommandWithFd(command string, args map[string]any, fd *os.File) error {
+	cmd, err := serializeCommand(command, args)
+	if err != nil {
+		return err
+	}
+
+	_, err = m.q.RunWithFile(cmd, fd)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *monitor) runCommandsWithResponse(command string, args map[string]any, resp any) error {
+	cmd, err := serializeCommand(command, args)
+	if err != nil {
+		return err
+	}
+
+	respBytes, err := m.q.Run(cmd)
 	if err != nil {
 		return err
 	}
@@ -86,6 +115,10 @@ func (m *monitor) AddDevice(device map[string]any) error {
 
 func (m *monitor) AddBlockDevice(blockDev map[string]any) error {
 	return m.runCommand("blockdev-add", blockDev)
+}
+
+func (m *monitor) AddNetworkDevice(netDev map[string]any) error {
+	return m.runCommand("netdev_add", netDev)
 }
 
 func (m *monitor) Continue() error {
@@ -118,4 +151,41 @@ func (m *monitor) Status() (RunState, error) {
 	}
 
 	return resp.Return.Status, nil
+}
+
+func (m *monitor) QueryCPUs() ([]CpuInfo, error) {
+	var resp struct {
+		Return []CpuInfo
+	}
+
+	err := m.runCommandsWithResponse("query-cpus-fast", nil, &resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Return, nil
+}
+
+func (m *monitor) SendFd(name string, fd *os.File) error {
+	err := m.runCommandWithFd("getfd", map[string]any{
+		"fdname": name,
+	}, fd)
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *monitor) CloseFd(name string) error {
+	err := m.runCommand("closefd", map[string]any{
+		"fdname": name,
+	})
+
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

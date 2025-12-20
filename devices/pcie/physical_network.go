@@ -7,6 +7,7 @@ import (
 )
 
 type physicalNetworkDevice struct {
+	hotPlug
 	id string
 }
 
