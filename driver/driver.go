@@ -351,13 +351,15 @@ func (d *driver) Start() error {
 		}
 	}
 
-	vsockFile, err := openVsock(d.config.VsockCid)
-	if err != nil {
-		return fmt.Errorf("allocating vsock cid %d: %w", d.config.VsockCid, err)
-	}
+	if d.config.VsockCid != 0 {
+		vsockFile, err := openVsock(d.config.VsockCid)
+		if err != nil {
+			return fmt.Errorf("allocating vsock cid %d: %w", d.config.VsockCid, err)
+		}
 
-	vsockFd := builder.AddFd(vsockFile)
-	desc.Pcie().AddDevice(pcie.NewVsock("vsock", d.config.VsockCid, vsockFd))
+		vsockFd := builder.AddFd(vsockFile)
+		desc.Pcie().AddDevice(pcie.NewVsock("vsock", d.config.VsockCid, vsockFd))
+	}
 
 	config, hotplugDevices := desc.BuildConfig()
 

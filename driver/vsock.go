@@ -15,6 +15,10 @@ import (
 import "C"
 
 func openVsock(cid uint32) (retF *os.File, retErr error) {
+	if cid == 1 || cid == 2 || cid == 0xffffffff {
+		return nil, fmt.Errorf("vsock cid %d is reserved", cid)
+	}
+
 	f, err := os.OpenFile("/dev/vhost-vsock", os.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("opening /dev/vhost-vsock: %w", err)
