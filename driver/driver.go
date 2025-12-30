@@ -387,7 +387,7 @@ func (d *driver) Start() error {
 	//builder.ConnectStderr(stderr)
 	//builder.ConnectStdout(stdout)
 
-	builder.ConnectStdin(os.Stdin)
+	//builder.ConnectStdin(os.Stdin)
 	builder.ConnectStderr(os.Stderr)
 	builder.ConnectStdout(os.Stdout)
 
