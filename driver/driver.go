@@ -3,6 +3,7 @@ package driver
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path"
@@ -307,6 +308,11 @@ func (d *driver) Start() error {
 		return fmt.Errorf("removing old qmp socket: %w", err)
 	}
 
+	err = util.RemoveIfExists(d.filePath(ConsoleSocketFileName))
+	if err != nil {
+		return fmt.Errorf("removing old console socket: %w", err)
+	}
+
 	desc := machine.Description{}
 
 	desc.Cpu(1, int(d.config.CpuCount), int(d.config.CpuCount))
@@ -327,9 +333,26 @@ func (d *driver) Start() error {
 	desc.Pcie().AddDevice(pcie.NewVga("vga", pcie.StdVga))
 
 	desc.AddChardev(chardev.NewRingbuf("console-ringbuf", 4096))
+
+	consoleSocketListener, err := net.Listen("unix", d.filePath(ConsoleSocketFileName))
+	if err != nil {
+		return fmt.Errorf("creating listener for console socket: %w", err)
+	}
+
+	err = os.Chmod(d.filePath(ConsoleSocketFileName), 0777)
+	if err != nil {
+		_ = consoleSocketListener.Close()
+		return fmt.Errorf("changing permissions on console socket path: %w", err)
+	}
+
+	consoleSocketFile, err := consoleSocketListener.(*net.UnixListener).File()
+	if err != nil {
+		return fmt.Errorf("getting fd from console socket listener: %w", err)
+	}
+
 	desc.AddChardev(chardev.NewSocket("console-socket", chardev.SocketOpts{
 		Unix: chardev.SocketOptsUnix{
-			Path: d.filePath(ConsoleSocketFileName),
+			Fd: builder.AddFd(consoleSocketFile),
 		},
 		Server: true,
 		Wait:   false,

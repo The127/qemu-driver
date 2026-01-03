@@ -35,6 +35,7 @@ type SocketOptsTcp struct {
 
 type SocketOptsUnix struct {
 	Path string
+	Fd   int
 }
 
 func NewSocket(id string, opts SocketOpts) Chardev {
@@ -65,6 +66,8 @@ func (c *socketChardev) Config() config.Section {
 
 	if c.opts.Unix.Path != "" {
 		options["path"] = c.opts.Unix.Path
+	} else if c.opts.Unix.Fd != 0 {
+		options["fd"] = fmt.Sprintf("%d", c.opts.Unix.Fd)
 	} else {
 		if c.opts.Tcp.Host != "" {
 			options["host"] = c.opts.Tcp.Host
