@@ -1,9 +1,20 @@
 package driver
 
-import "github.com/google/uuid"
-
-type CephVolume struct {
-	Id uuid.UUID
+type cephVolume struct {
+	Id   string
+	Pool string
+	Name string
 }
 
-func (CephVolume) __volumeMarker() {}
+func (cephVolume) __volumeMarker() {}
+
+func NewCephVolume(id string, pool string, name string) Volume {
+	if len(id) > 24 {
+		panic("id is too long")
+	}
+	return cephVolume{
+		Id:   id,
+		Pool: pool,
+		Name: name,
+	}
+}

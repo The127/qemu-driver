@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"os"
 	"path"
@@ -34,9 +33,24 @@ func main() {
 	//	byte(rand.Int31n(256)),
 	//}
 
+	userData := `#cloud-config
+users:
+  - name: root
+    lock_passwd: false
+    hashed_passwd: "$6$rounds=4096$nqxzsCUB62RiUjKp$YX0V8FDfz/9LdV6d5s0UGKBT8tAH2svzBILoS9Z/rWXjcny9Z9.ANt5XI6PU87268UrJrWeqtmH1lupgZtKZI/"
+
+  - name: arch
+    lock_passwd: false
+    hashed_passwd: "$6$ekjadUze3yUXluSP$KTBA960c5FiFQIVHz7WQ8/9paorVjLWbnQ./NpUG8sE99ehX4SELqrMPEFq/yFKCB55i9gw6xbg.75i49WRlh/"
+
+runcmd:
+  - echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+`
+
 	d, err := driver.New("/usr/bin/qemu-system-x86_64", driver.MachineConfiguration{
 		Id:                 id,
 		StorageDirectory:   storagePath,
+		RuntimeDirectory:   storagePath,
 		ImageSourcePath:    imageSource,
 		FirmwareSourcePath: firmwareSource,
 		NvramSourcePath:    nvramSource,
@@ -46,12 +60,14 @@ func main() {
 		NetworkInterfaces:  []driver.NetworkInterface{
 			//driver.NewTapNetworkInterface("test-tap", hwaddr),
 		},
-		Volumes:  nil,
-		VsockCid: 3,
+		Volumes: []driver.Volume{
+			driver.NewCephVolume("sample-volume", "dev", "33333333-549a-42d3-87c9-090451088b24"),
+		},
+		VsockCid: 4,
 		CloudInit: driver.CloudInitData{
-			Vendor:  base64.RawStdEncoding.EncodeToString([]byte(fmt.Sprintf("instance-id: %s", id))),
+			Vendor:  fmt.Sprintf("instance-id: %s", id),
 			Meta:    "",
-			User:    "I2Nsb3VkLWNvbmZpZwp1c2VyczoKICAtIG5hbWU6IHJvb3QKICAgIGxvY2tfcGFzc3dkOiBmYWxzZQogICAgaGFzaGVkX3Bhc3N3ZDogIiQ2JHJvdW5kcz00MDk2JG5xeHpzQ1VCNjJSaVVqS3AkWVgwVjhGRGZ6LzlMZFY2ZDVzMFVHS0JUOHRBSDJzdnpCSUxvUzlaL3JXWGpjbnk5WjkuQU50NVhJNlBVODcyNjhVckpyV2VxdG1IMWx1cGdadEtaSS8iCgogIC0gbmFtZTogYXJjaAogICAgbG9ja19wYXNzd2Q6IGZhbHNlCiAgICBoYXNoZWRfcGFzc3dkOiAiJDYkZWtqYWRVemUzeVVYbHVTUCRLVEJBOTYwYzVGaUZRSVZIejdXUTgvOXBhb3JWakxXYm5RLi9OcFVHOHNFOTllaFg0U0VMcXJNUEVGcS95RktDQjU1aTlndzZ4YmcuNzVpNDlXUmxoLyIKCnJ1bmNtZDoKICAtIGVjaG8gJ1Blcm1pdFJvb3RMb2dpbiB5ZXMnID4",
+			User:    string(userData),
 			Network: "",
 		},
 	})

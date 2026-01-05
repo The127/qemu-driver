@@ -357,9 +357,10 @@ func (d *driver) Start() error {
 
 	for _, volume := range d.config.Volumes {
 		switch v := volume.(type) {
-		case CephVolume:
-			_ = v
-			desc.Scsi().AddDisk(storage.NewRbdDrive()) // TODO: volume config
+		case cephVolume:
+			desc.Scsi().AddDisk(storage.NewRbdDrive(v.Id, v.Pool, v.Name))
+		default:
+			panic("not implemented")
 		}
 	}
 
