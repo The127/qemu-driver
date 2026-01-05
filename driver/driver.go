@@ -26,18 +26,24 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+type StorageFilename string
+type RuntimeFilename string
+
 const (
-	QemuPidFileName       = "qemu.pid"
-	QemuQmpSocketFileName = "qmp.sock"
-	ConsoleSocketFileName = "console.sock"
-	RootDiskFileName      = "rootdisk.img"
-	ConfigFileName        = "qemu.conf"
-	QemuStdErrFileName    = "stderr.log"
-	QemuStdOutFileName    = "stdout.log"
-	FirmwareFileName      = "firmware.fd"
-	NvramFileName         = "nvram.fd"
-	CloudInitIsoFile      = "cloud-init.iso"
-	CreatedFlagFileName   = "created"
+	QemuPidFileName     StorageFilename = "qemu.pid"
+	RootDiskFileName    StorageFilename = "rootdisk.img"
+	ConfigFileName      StorageFilename = "qemu.conf"
+	QemuStdErrFileName  StorageFilename = "stderr.log"
+	QemuStdOutFileName  StorageFilename = "stdout.log"
+	FirmwareFileName    StorageFilename = "firmware.fd"
+	NvramFileName       StorageFilename = "nvram.fd"
+	CloudInitIsoFile    StorageFilename = "cloud-init.iso"
+	CreatedFlagFileName StorageFilename = "created"
+)
+
+const (
+	QemuQmpSocketFileName RuntimeFilename = "qmp.sock"
+	ConsoleSocketFileName RuntimeFilename = "console.sock"
 )
 
 type Driver interface {
@@ -68,7 +74,7 @@ func New(qemuPath string, config MachineConfiguration) (Driver, error) {
 		qemuPidFd: -1,
 	}
 
-	pidFilePath := d.filePath(QemuPidFileName)
+	pidFilePath := d.storagePath(QemuPidFileName)
 	pidFileBytes, err := os.ReadFile(pidFilePath)
 	if os.IsNotExist(err) {
 		return d, nil
@@ -183,23 +189,6 @@ func (d *driver) signalExit() {
 
 }
 
-func (d *driver) copyIfNotExists(srcPath string, dstFileName string) error {
-	dstPath := d.filePath(dstFileName)
-	exists, err := util.FileExists(dstPath)
-	if err != nil {
-		return fmt.Errorf("stat on %s: %w", dstPath, err)
-	}
-
-	if !exists {
-		err := util.CopyFile(srcPath, dstPath)
-		if err != nil {
-			return fmt.Errorf("copying %s to %s: %w", srcPath, dstPath, err)
-		}
-	}
-
-	return nil
-}
-
 // Create copies over the rootdisk from the image specified in the configuration, as well as the firmware and nvram files
 // This operation effectively destroys any existing root disk and resets the nvram.
 func (d *driver) Create() error {
@@ -207,7 +196,7 @@ func (d *driver) Create() error {
 		return fmt.Errorf("VM is running")
 	}
 
-	rootDiskPath := d.filePath(RootDiskFileName)
+	rootDiskPath := d.storagePath(RootDiskFileName)
 	err := util.RemoveIfExists(rootDiskPath)
 	if err != nil {
 		return fmt.Errorf("deleting existing root disk: %w", err)
@@ -233,7 +222,7 @@ func (d *driver) Create() error {
 		return fmt.Errorf("resizing image (%s): %w", cmd, err)
 	}
 
-	firmwarePath := d.filePath(FirmwareFileName)
+	firmwarePath := d.storagePath(FirmwareFileName)
 	err = util.RemoveIfExists(firmwarePath)
 	if err != nil {
 		return fmt.Errorf("deleting existing firmware file: %w", err)
@@ -244,7 +233,7 @@ func (d *driver) Create() error {
 		return fmt.Errorf("copying firmware file: %w", err)
 	}
 
-	nvramPath := d.filePath(NvramFileName)
+	nvramPath := d.storagePath(NvramFileName)
 	err = util.RemoveIfExists(nvramPath)
 
 	if err != nil {
@@ -259,13 +248,13 @@ func (d *driver) Create() error {
 	fmt.Printf("cloud init: %v", d.config.CloudInit)
 	if (d.config.CloudInit != CloudInitData{}) {
 		fmt.Printf("creating cloud init volume")
-		err := d.config.CloudInit.CreateIso(d.filePath(CloudInitIsoFile))
+		err := d.config.CloudInit.CreateIso(d.storagePath(CloudInitIsoFile))
 		if err != nil {
 			return fmt.Errorf("creating cloud init iso: %w", err)
 		}
 	}
 
-	err = os.WriteFile(d.filePath(CreatedFlagFileName), make([]byte, 0), 0o644)
+	err = os.WriteFile(d.storagePath(CreatedFlagFileName), make([]byte, 0), 0o644)
 	if err != nil {
 		return fmt.Errorf("creating flag file: %w", err)
 	}
@@ -281,7 +270,7 @@ func (d *driver) Start() error {
 		return fmt.Errorf("VM is already running")
 	}
 
-	configFilePath := d.filePath(ConfigFileName)
+	configFilePath := d.storagePath(ConfigFileName)
 	err := util.RemoveIfExists(configFilePath)
 	if err != nil {
 		return fmt.Errorf("removing old config file: %w", err)
@@ -300,15 +289,15 @@ func (d *driver) Start() error {
 		"-serial", "chardev:console",
 		"-readconfig", configFilePath,
 		"-machine", "q35",
-		"-pidfile", d.filePath(QemuPidFileName),
+		"-pidfile", d.storagePath(QemuPidFileName),
 	)
 
-	err = util.RemoveIfExists(d.filePath(QemuQmpSocketFileName))
+	err = util.RemoveIfExists(d.runtimePath(QemuQmpSocketFileName))
 	if err != nil {
 		return fmt.Errorf("removing old qmp socket: %w", err)
 	}
 
-	err = util.RemoveIfExists(d.filePath(ConsoleSocketFileName))
+	err = util.RemoveIfExists(d.runtimePath(ConsoleSocketFileName))
 	if err != nil {
 		return fmt.Errorf("removing old console socket: %w", err)
 	}
@@ -325,7 +314,7 @@ func (d *driver) Start() error {
 
 	desc.Memory(memoryMiB, 64*1024) // TODO: configurable max size
 
-	desc.Monitor(d.filePath(QemuQmpSocketFileName))
+	desc.Monitor(d.runtimePath(QemuQmpSocketFileName))
 
 	desc.Pcie().AddDevice(pcie.NewBalloon("balloon"))
 	desc.Pcie().AddDevice(pcie.NewKeyboard("keyboard"))
@@ -334,12 +323,12 @@ func (d *driver) Start() error {
 
 	desc.AddChardev(chardev.NewRingbuf("console-ringbuf", 4096))
 
-	consoleSocketListener, err := net.Listen("unix", d.filePath(ConsoleSocketFileName))
+	consoleSocketListener, err := net.Listen("unix", d.runtimePath(ConsoleSocketFileName))
 	if err != nil {
 		return fmt.Errorf("creating listener for console socket: %w", err)
 	}
 
-	err = os.Chmod(d.filePath(ConsoleSocketFileName), 0777)
+	err = os.Chmod(d.runtimePath(ConsoleSocketFileName), 0777)
 	if err != nil {
 		_ = consoleSocketListener.Close()
 		return fmt.Errorf("changing permissions on console socket path: %w", err)
@@ -360,10 +349,10 @@ func (d *driver) Start() error {
 
 	desc.AddChardev(chardev.NewHub("console", "console-ringbuf", "console-socket"))
 
-	desc.Scsi().AddDisk(storage.NewImageDrive("rootdisk", d.filePath(RootDiskFileName)))
+	desc.Scsi().AddDisk(storage.NewImageDrive("rootdisk", d.storagePath(RootDiskFileName)))
 
 	if (d.config.CloudInit != CloudInitData{}) {
-		desc.Scsi().AddDisk(storage.NewCdromDrive("cloud-init-cidata", d.filePath(CloudInitIsoFile)))
+		desc.Scsi().AddDisk(storage.NewCdromDrive("cloud-init-cidata", d.storagePath(CloudInitIsoFile)))
 	}
 
 	for _, volume := range d.config.Volumes {
@@ -401,7 +390,7 @@ func (d *driver) Start() error {
 		return fmt.Errorf("writing config file: %w", err)
 	}
 
-	stdout, err := os.Create(d.filePath(QemuStdOutFileName))
+	stdout, err := os.Create(d.storagePath(QemuStdOutFileName))
 	if err != nil {
 		return fmt.Errorf("creating stdout log file: %w", err)
 	}
@@ -409,7 +398,7 @@ func (d *driver) Start() error {
 	//goland:noinspection GoUnhandledErrorResult
 	defer stdout.Close()
 
-	stderr, err := os.Create(d.filePath(QemuStdErrFileName))
+	stderr, err := os.Create(d.storagePath(QemuStdErrFileName))
 	if err != nil {
 		return fmt.Errorf("creating stderr log file: %w", err)
 	}
@@ -488,7 +477,7 @@ func (d *driver) connectMonitor() (qmp.Monitor, error) {
 	var err error
 
 	for {
-		mon, err = qmp.Connect(d.filePath(QemuQmpSocketFileName))
+		mon, err = qmp.Connect(d.runtimePath(QemuQmpSocketFileName))
 		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ECONNREFUSED) {
 			fmt.Println("qmp socket is not ready yet, retrying in a second")
 			time.Sleep(time.Second * 1)
@@ -505,8 +494,12 @@ func (d *driver) connectMonitor() (qmp.Monitor, error) {
 	return mon, nil
 }
 
-func (d *driver) filePath(name string) string {
-	return path.Join(d.config.StoragePath, name)
+func (d *driver) storagePath(name StorageFilename) string {
+	return path.Join(d.config.StorageDirectory, string(name))
+}
+
+func (d *driver) runtimePath(name RuntimeFilename) string {
+	return path.Join(d.config.RuntimeDirectory, string(name))
 }
 
 func (d *driver) Stop() error {
@@ -568,7 +561,7 @@ func (d *driver) GetState() Status {
 	defer d.mu.Unlock()
 
 	if d.qemuPidFd == -1 {
-		isCreated, err := util.FileExists(d.filePath(CreatedFlagFileName))
+		isCreated, err := util.FileExists(d.storagePath(CreatedFlagFileName))
 		if err != nil {
 			fmt.Printf("failed to check creation flag existence: %v\n", err)
 			return Unknown

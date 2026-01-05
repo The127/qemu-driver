@@ -12,7 +12,8 @@ import (
 
 type MachineConfiguration struct {
 	Id                 uuid.UUID
-	StoragePath        string
+	StorageDirectory   string
+	RuntimeDirectory   string
 	ImageSourcePath    string
 	FirmwareSourcePath string
 	NvramSourcePath    string

@@ -36,7 +36,7 @@ func main() {
 
 	d, err := driver.New("/usr/bin/qemu-system-x86_64", driver.MachineConfiguration{
 		Id:                 id,
-		StoragePath:        storagePath,
+		StorageDirectory:   storagePath,
 		ImageSourcePath:    imageSource,
 		FirmwareSourcePath: firmwareSource,
 		NvramSourcePath:    nvramSource,
