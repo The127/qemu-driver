@@ -358,7 +358,10 @@ func (d *driver) Start() error {
 	for _, volume := range d.config.Volumes {
 		switch v := volume.(type) {
 		case cephVolume:
-			desc.Scsi().AddDisk(storage.NewRbdDrive(v.Id, v.Pool, v.Name))
+			if len(v.Serial) > 20 {
+				return fmt.Errorf("serial %q is too long", v.Serial)
+			}
+			desc.Scsi().AddDisk(storage.NewRbdDrive(v.Serial, v.Pool, v.Name))
 		default:
 			panic("not implemented")
 		}

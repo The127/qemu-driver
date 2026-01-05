@@ -9,16 +9,16 @@ import (
 )
 
 type rbdDrive struct {
-	id   string
-	pool string
-	name string
+	serial string
+	pool   string
+	name   string
 }
 
-func NewRbdDrive(id string, pool string, name string) RbdDrive {
+func NewRbdDrive(serial string, pool string, name string) RbdDrive {
 	return &rbdDrive{
-		id:   id,
-		pool: pool,
-		name: name,
+		serial: serial,
+		pool:   pool,
+		name:   name,
 	}
 }
 
@@ -31,7 +31,6 @@ func (d *rbdDrive) GetScsiHotplug(bus string) devices.HotplugDevice {
 }
 
 func (d *rbdDrive) Plug(m qmp.Monitor, bus string) error {
-	nodeName := "vol-" + d.id
 	err := m.AddBlockDevice(map[string]any{
 		"cache": map[string]any{
 			"direct":   false,
@@ -41,7 +40,7 @@ func (d *rbdDrive) Plug(m qmp.Monitor, bus string) error {
 		"driver":    "rbd",
 		"pool":      d.pool,
 		"image":     d.name,
-		"node-name": nodeName,
+		"node-name": d.serial,
 		"read-only": false,
 	})
 
@@ -50,14 +49,13 @@ func (d *rbdDrive) Plug(m qmp.Monitor, bus string) error {
 	}
 
 	err = m.AddDevice(map[string]any{
-		"id":        d.id,
-		"drive":     nodeName,
-		"serial":    d.id,
-		"device_id": nodeName,
-		"channel":   0,
-		"lun":       1,
-		"bus":       bus,
-		"driver":    "scsi-hd",
+		"id":      fmt.Sprintf("scsi-%s", d.serial),
+		"drive":   d.serial,
+		"serial":  d.serial,
+		"channel": 0,
+		"lun":     1,
+		"bus":     bus,
+		"driver":  "scsi-hd",
 	})
 
 	if err != nil {

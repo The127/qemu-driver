@@ -16,9 +16,9 @@ const (
 )
 
 type imageDrive struct {
-	id   string
-	path string
-	typ  imageDriveType
+	serial string
+	path   string
+	typ    imageDriveType
 }
 
 type ImageDrive interface {
@@ -26,19 +26,19 @@ type ImageDrive interface {
 	BlkDrive
 }
 
-func NewImageDrive(id string, path string) ImageDrive {
+func NewImageDrive(serial string, path string) ImageDrive {
 	return &imageDrive{
-		id:   id,
-		path: path,
-		typ:  typeDisk,
+		serial: serial,
+		path:   path,
+		typ:    typeDisk,
 	}
 }
 
-func NewCdromDrive(id string, path string) ImageDrive {
+func NewCdromDrive(serial string, path string) ImageDrive {
 	return &imageDrive{
-		id:   id,
-		path: path,
-		typ:  typeCdrom,
+		serial: serial,
+		path:   path,
+		typ:    typeCdrom,
 	}
 }
 
@@ -51,7 +51,6 @@ func (d *imageDrive) GetScsiHotplug(bus string) devices.HotplugDevice {
 }
 
 func (d *imageDrive) Plug(m qmp.Monitor, bus string) error {
-	nodeName := "vol-" + d.id
 	var driver string
 	var readonly bool
 
@@ -71,7 +70,7 @@ func (d *imageDrive) Plug(m qmp.Monitor, bus string) error {
 		},
 		"discard":   "unmap", // Forward as an unmap request. This is the same as `discard=on` in the qemu config file.
 		"driver":    "file",
-		"node-name": nodeName,
+		"node-name": d.serial,
 		"read-only": readonly,
 		"locking":   "off",
 		"filename":  d.path,
@@ -82,14 +81,13 @@ func (d *imageDrive) Plug(m qmp.Monitor, bus string) error {
 	}
 
 	err = m.AddDevice(map[string]any{
-		"id":        d.id,
-		"drive":     nodeName,
-		"serial":    d.id,
-		"device_id": nodeName,
-		"channel":   0,
-		"lun":       1,
-		"bus":       bus,
-		"driver":    driver,
+		"id":      fmt.Sprintf("scsi-%s", d.serial),
+		"drive":   d.serial,
+		"serial":  d.serial,
+		"channel": 0,
+		"lun":     1,
+		"bus":     bus,
+		"driver":  driver,
 	})
 
 	if err != nil {
