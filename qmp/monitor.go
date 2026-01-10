@@ -18,9 +18,13 @@ type Monitor interface {
 	Disconnect() error
 	Status() (RunState, error)
 	QueryCPUs() ([]CpuInfo, error)
+	QueryHotpluggableCPUs() ([]HotpluggableCpu, error)
 	QueryMemorySummary() (MemorySummary, error)
 	QueryMemoryDevices() ([]MemoryDevice, error)
+	QueryPCI() ([]PciBus, error)
+	QomList(path string) ([]QomItem, error)
 	AddMemoryBackend(id string, size uint64) error
+	RemoveMemoryBackend(id string) error
 	SendFd(name string, fd *os.File) error
 	CloseFd(name string) error
 }
@@ -145,7 +149,6 @@ func (m *monitor) Status() (RunState, error) {
 	var resp Response[struct {
 		Status RunState `json:"status"`
 	}]
-
 	err := m.runCommandsWithResponse("query-status", nil, &resp)
 	if err != nil {
 		return "", err
@@ -156,8 +159,17 @@ func (m *monitor) Status() (RunState, error) {
 
 func (m *monitor) QueryCPUs() ([]CpuInfo, error) {
 	var resp Response[[]CpuInfo]
-
 	err := m.runCommandsWithResponse("query-cpus-fast", nil, &resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Return, nil
+}
+
+func (m *monitor) QueryHotpluggableCPUs() ([]HotpluggableCpu, error) {
+	var resp Response[[]HotpluggableCpu]
+	err := m.runCommandsWithResponse("query-hotpluggable-cpus", nil, &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +179,6 @@ func (m *monitor) QueryCPUs() ([]CpuInfo, error) {
 
 func (m *monitor) QueryMemorySummary() (MemorySummary, error) {
 	var resp Response[MemorySummary]
-
 	err := m.runCommandsWithResponse("query-memory-size-summary", nil, &resp)
 	if err != nil {
 		return MemorySummary{}, err
@@ -178,7 +189,6 @@ func (m *monitor) QueryMemorySummary() (MemorySummary, error) {
 
 func (m *monitor) QueryMemoryDevices() ([]MemoryDevice, error) {
 	var resp Response[[]MemoryDevice]
-
 	err := m.runCommandsWithResponse("query-memory-devices", nil, &resp)
 	if err != nil {
 		return nil, err
@@ -198,6 +208,42 @@ func (m *monitor) AddMemoryBackend(id string, size uint64) error {
 	}
 
 	return nil
+}
+
+func (m *monitor) RemoveMemoryBackend(id string) error {
+	err := m.runCommand("object-del", map[string]any{
+		"id": id,
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *monitor) QueryPCI() ([]PciBus, error) {
+	var resp Response[[]PciBus]
+	err := m.runCommandsWithResponse("query-pci", nil, &resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Return, nil
+}
+
+type QomItem struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+func (m *monitor) QomList(path string) ([]QomItem, error) {
+	var resp Response[[]QomItem]
+	err := m.runCommandsWithResponse("qom-list", map[string]any{"path": path}, &resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Return, nil
 }
 
 func (m *monitor) SendFd(name string, fd *os.File) error {

@@ -24,11 +24,10 @@ func (d *Description) Firmware(firmwarePath string, nvramPath string) {
 	d.nvramPath = nvramPath
 }
 
-func (d *Description) Cpu(sockets int, cores int, threads int) {
+func (d *Description) Cpu(cpus int, maxCpus int) {
 	d.cpu = cpuConfig{
-		sockets: sockets,
-		cores:   cores,
-		threads: threads,
+		cpus:    cpus,
+		maxCpus: maxCpus,
 	}
 }
 
@@ -125,7 +124,6 @@ func (d *Description) BuildConfig() (config.Builder, []devices.HotplugDevice) {
 
 	if d.memory != (memoryConfig{}) {
 		cfg.AddSection(d.memory.Config())
-		hotplugDevices = append(hotplugDevices, d.memory.GetHotplugs()...)
 	}
 
 	if d.cpu != (cpuConfig{}) {

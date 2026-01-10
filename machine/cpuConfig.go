@@ -7,18 +7,16 @@ import (
 )
 
 type cpuConfig struct {
-	sockets int
-	cores   int
-	threads int
+	cpus    int
+	maxCpus int
 }
 
 func (c *cpuConfig) Config() config.Section {
 	return config.Section{
 		Name: "smp-opts",
 		Entries: map[string]string{
-			"sockets": fmt.Sprintf("%d", c.sockets),
-			"cores":   fmt.Sprintf("%d", c.cores),
-			"threads": fmt.Sprintf("%d", c.threads),
+			"cpus":    fmt.Sprintf("%d", c.cpus),
+			"maxcpus": fmt.Sprintf("%d", c.maxCpus),
 		},
 	}
 }

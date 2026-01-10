@@ -2,9 +2,10 @@ package main
 
 import (
 	"fmt"
+	"math/rand"
+	"net"
 	"os"
 	"path"
-	"time"
 
 	"github.com/gwenya/qemu-driver/driver"
 
@@ -31,14 +32,14 @@ func main() {
 		panic(err)
 	}
 
-	//hwaddr := net.HardwareAddr{
-	//	(byte(rand.Int31n(256)) & ^byte(0b1)) | byte(0b10),
-	//	byte(rand.Int31n(256)),
-	//	byte(rand.Int31n(256)),
-	//	byte(rand.Int31n(256)),
-	//	byte(rand.Int31n(256)),
-	//	byte(rand.Int31n(256)),
-	//}
+	hwaddr := net.HardwareAddr{
+		(byte(rand.Int31n(256)) & ^byte(0b1)) | byte(0b10),
+		byte(rand.Int31n(256)),
+		byte(rand.Int31n(256)),
+		byte(rand.Int31n(256)),
+		byte(rand.Int31n(256)),
+		byte(rand.Int31n(256)),
+	}
 
 	userData := `#cloud-config
 users:
@@ -69,6 +70,9 @@ runcmd:
 		panic(err)
 	}
 
+	//goland:noinspection GoUnhandledErrorResult
+	defer d.Close()
+
 	if d.GetStatus() == driver.Uninitialized {
 		err = d.Create(driver.CreateOptions{
 			ImageSourcePath:   imageSource,
@@ -81,7 +85,7 @@ runcmd:
 
 	if d.GetStatus() != driver.Running {
 		err = d.Start(driver.StartOptions{
-			CpuCount:   1,
+			CpuCount:   3,
 			MemorySize: 1024 * 1024 * 1024,
 			DiskSize:   10_000_000_000,
 			CloudInit: driver.CloudInit{
@@ -95,35 +99,18 @@ runcmd:
 					"33333333-549a-42d3-87c9-090451088b24",
 				),
 			},
-			//NetworkAdapters: []driver.NetworkAdapter{
-			//	driver.NewTapNetworkAdapter("test-tap", hwaddr),
-			//},
-			VsockCid: 3,
+			NetworkAdapters: []driver.NetworkAdapter{},
+			VsockCid:        3,
 		})
 		if err != nil {
 			panic(err)
 		}
 
-		time.Sleep(time.Second * 3)
-
-		err := d.SetMemory(2 * 1024 * 1024 * 1024)
+	} else {
+		err := d.AttachNetworkAdapter(driver.NewTapNetworkAdapter("test-tap", hwaddr))
 		if err != nil {
 			panic(err)
 		}
-
-	} else {
-		for range 30 {
-			if d.GetStatus() != driver.Running {
-				break
-			}
-			time.Sleep(time.Second)
-		}
 	}
 
-	err = d.Close()
-	if err != nil {
-		panic(err)
-	}
-
-	time.Sleep(time.Second * 10)
 }

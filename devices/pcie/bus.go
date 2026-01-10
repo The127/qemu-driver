@@ -89,7 +89,6 @@ func (r *busAllocator) Allocate() []Allocation {
 	for _, device := range hotplugDevices {
 		portNum := i / 8
 		portName := fmt.Sprintf("pcie_port_%d", portNum)
-		deviceFn := i % 8
 
 		port := portNum / 8
 		portFn := portNum % 8
@@ -106,8 +105,28 @@ func (r *busAllocator) Allocate() []Allocation {
 		allocations = append(allocations, Allocation{
 			Device:        device,
 			Bus:           portName,
-			Addr:          fmt.Sprintf("00.%d", deviceFn),
+			Addr:          "00.0",
 			Multifunction: false,
+		})
+
+		i += 8
+	}
+
+	// add some root ports for hot-plugging additional devices, the amount should be configurable, maybe different way of doing it
+	for range 8 {
+		portNum := i / 8
+		portName := fmt.Sprintf("pcie_port_%d", portNum)
+
+		port := portNum / 8
+		portFn := portNum % 8
+		allocations = append(allocations, Allocation{
+			Device: &rootPort{
+				id:    portName,
+				index: portNum,
+			},
+			Bus:           rootBus,
+			Addr:          fmt.Sprintf("%x.%d", port, portFn),
+			Multifunction: portFn == 0,
 		})
 
 		i += 8

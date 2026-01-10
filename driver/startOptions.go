@@ -1,7 +1,7 @@
 package driver
 
 type StartOptions struct {
-	CpuCount        int
+	CpuCount        uint32
 	MemorySize      uint64
 	DiskSize        uint64
 	CloudInit       CloudInit

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,12 +44,10 @@ type Driver interface {
 	SetMemory(bytes uint64) error
 
 	GetNetworkAdapterNames() ([]string, error)
-	SetNetworkAdapters(networks []NetworkAdapter) error
 	AttachNetworkAdapter(adapter NetworkAdapter) error
 	DetachNetworkAdapter(name string) error
 
 	GetVolumeIdentifiers() ([]DiskIdentifier, error)
-	SetVolumes(volumes []Volume) error
 	AttachVolume(volume Volume) error
 	DetachVolume(id DiskIdentifier) error
 
@@ -328,7 +327,7 @@ func (d *driver) Start(opts StartOptions) error {
 
 	desc := machine.Description{}
 
-	desc.Cpu(1, opts.CpuCount, opts.CpuCount)
+	desc.Cpu(int(opts.CpuCount), 8) // TODO: configureable max cpus
 
 	memoryMiB := int(opts.MemorySize / 1024 / 1024)
 
@@ -446,8 +445,8 @@ func (d *driver) Start(opts StartOptions) error {
 
 	builder.SetSession(true)
 
-	var pidfd int
-	builder.SetPidFdReceiver(&pidfd)
+	var pidfdReceiver int
+	builder.SetPidFdReceiver(&pidfdReceiver)
 
 	cmd := builder.Build()
 
@@ -456,7 +455,7 @@ func (d *driver) Start(opts StartOptions) error {
 		return fmt.Errorf("starting qemu process (%s): %w", cmd, err)
 	}
 
-	d.qemuPidFd = pidfd
+	d.qemuPidFd = pidfdReceiver
 	err = d.startWatcher()
 	if err != nil {
 		return fmt.Errorf("starting qemu process watcher: %w", err)
@@ -639,6 +638,8 @@ func (d *driver) resizeRootdisk(size uint64) error {
 }
 
 func (d *driver) Stop() error {
+	// TODO: if it fails, kill the qemu process
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	mon, err := d.connectMonitor()
@@ -719,8 +720,71 @@ func (d *driver) GetCPUs() (uint32, error) {
 }
 
 func (d *driver) SetCPUs(count uint32) error {
-	//TODO implement me
-	panic("implement me")
+	mon, err := d.connectMonitor()
+	if err != nil {
+		return err
+	}
+
+	cpus, err := mon.QueryHotpluggableCPUs()
+	if err != nil {
+		return err
+	}
+
+	var availableCPUs []qmp.HotpluggableCpu
+	var pluggedCPUs []qmp.HotpluggableCpu
+
+	for _, cpu := range cpus {
+		if cpu.QomPath == "" {
+			availableCPUs = append(availableCPUs, cpu)
+		} else {
+			pluggedCPUs = append(pluggedCPUs, cpu)
+		}
+	}
+
+	plugged := len(pluggedCPUs)
+	available := len(availableCPUs)
+	needed := int(count) - plugged
+
+	if needed == 0 {
+		return nil
+	}
+
+	if needed < 0 {
+		return newRestartRequiredErr("hot-unplugging CPUs is not supported")
+	}
+
+	if needed > available {
+		return newRestartRequiredErr(fmt.Sprintf("not enough CPU hotplug slots"))
+	}
+
+	slices.SortFunc(availableCPUs, func(a, b qmp.HotpluggableCpu) int {
+		if a.Props.SocketId != b.Props.SocketId {
+			return a.Props.SocketId - b.Props.SocketId
+		}
+
+		if a.Props.CoreId != b.Props.CoreId {
+			return a.Props.CoreId - b.Props.CoreId
+		}
+
+		return a.Props.ThreadId - b.Props.ThreadId
+	})
+
+	for i := range needed {
+		cpu := availableCPUs[i]
+		id := fmt.Sprintf("cpu-%d-%d-%d", cpu.Props.SocketId, cpu.Props.CoreId, cpu.Props.ThreadId)
+		err := mon.AddDevice(map[string]any{
+			"id":        id,
+			"driver":    cpu.Type,
+			"socket-id": cpu.Props.SocketId,
+			"core-id":   cpu.Props.CoreId,
+			"thread-id": cpu.Props.ThreadId,
+		})
+		if err != nil {
+			return fmt.Errorf("CPU hotplug incomplete: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func (d *driver) GetMemory() (uint64, error) {
@@ -754,21 +818,7 @@ func (d *driver) SetMemory(bytes uint64) error {
 	}
 
 	if bytes < total {
-		return errors.New("restart required")
-	}
-
-	err = mon.AddMemoryBackend("mem1", bytes-total)
-	if err != nil {
-		return err
-	}
-
-	err = mon.AddDevice(map[string]any{
-		"driver": "pc-dimm",
-		"memdev": "mem1",
-		"id":     "dimm1",
-	})
-	if err != nil {
-		return err
+		return newRestartRequiredErr("hot-unplugging memory is not supported")
 	}
 
 	devices, err := mon.QueryMemoryDevices()
@@ -776,24 +826,121 @@ func (d *driver) SetMemory(bytes uint64) error {
 		return err
 	}
 
-	d.logger.Logf("memory devices: %+v", devices)
+	highestIdx := 0
+	for _, device := range devices {
+		if strings.HasPrefix(device.Data.Id, "dimm") {
+			idx, err := strconv.Atoi(strings.TrimPrefix(device.Data.Id, "dimm"))
+			if err == nil {
+				highestIdx = max(highestIdx, idx)
+			}
+		}
+	}
+
+	memId := fmt.Sprintf("mem%d", highestIdx+1)
+	deviceId := fmt.Sprintf("dimm%d", highestIdx+1)
+
+	err = mon.AddMemoryBackend(memId, bytes-total)
+	if err != nil {
+		return err
+	}
+
+	err = mon.AddDevice(map[string]any{
+		"driver": "pc-dimm",
+		"memdev": memId,
+		"id":     deviceId,
+	})
+
+	if err != nil {
+		err2 := mon.RemoveMemoryBackend(memId)
+		if err2 != nil {
+			d.logger.Logf("failed to remove memory backend %s: %v", memId, err)
+		}
+		return err
+	}
 
 	return nil
 }
 
 func (d *driver) GetNetworkAdapterNames() ([]string, error) {
-	//TODO implement me
-	panic("implement me")
-}
+	mon, err := d.connectMonitor()
+	if err != nil {
+		return nil, err
+	}
 
-func (d *driver) SetNetworkAdapters(networks []NetworkAdapter) error {
-	//TODO implement me
-	panic("implement me")
+	peripherals, err := mon.QomList("/machine/peripheral")
+	if err != nil {
+		return nil, err
+	}
+
+	netDeviceNames := make([]string, 0)
+
+	for _, peripheral := range peripherals {
+		if peripheral.Type == "child<virtio-net-pci>" {
+			netDeviceNames = append(netDeviceNames, strings.TrimPrefix(peripheral.Name, "tap-"))
+		}
+	}
+
+	return netDeviceNames, nil
 }
 
 func (d *driver) AttachNetworkAdapter(adapter NetworkAdapter) error {
-	//TODO implement me
-	panic("implement me")
+	var device pcie.BusDevice
+	switch opts := adapter.options.(type) {
+	case tapNetworkAdapterOptions:
+		device = pcie.NewTapNetworkDevice("tap-"+adapter.name, adapter.name, opts.macAddress)
+	default:
+		return errors.New("unsupported network adapter")
+	}
+
+	mon, err := d.connectMonitor()
+	if err != nil {
+		return err
+	}
+
+	buses, err := mon.QueryPCI()
+	if err != nil {
+		return err
+	}
+
+	var emptyBridge *qmp.PciDevice
+
+	for _, bus := range buses {
+		for _, pciDevice := range bus.Devices {
+			// we only care about root ports
+			// (id 1b36:000c, see https://www.qemu.org/docs/master/specs/pci-ids.html)
+			if pciDevice.Id.Vendor != 0x1b36 || pciDevice.Id.Device != 0x000c {
+				continue
+			}
+
+			// cannot hotplug into used root port
+			if len(pciDevice.PciBridge.Devices) > 0 {
+				continue
+			}
+
+			emptyBridge = &pciDevice
+		}
+	}
+
+	if emptyBridge == nil {
+		return newRestartRequiredErr("no empty pci root port for hotplug")
+	}
+
+	hotplugs := device.GetHotplugs(pcie.BusAllocation{
+		Bus:     emptyBridge.QdevId,
+		Address: "00.0",
+	})
+
+	if len(hotplugs) != 1 {
+		// network devices always return exactly one hotplug device
+		panic("logic error")
+	}
+
+	err = hotplugs[0].Plug(mon)
+	if err != nil {
+		return fmt.Errorf("hotplugging network adapter: %w", err)
+	}
+
+	return nil
 }
 
 func (d *driver) DetachNetworkAdapter(name string) error {
@@ -802,11 +949,6 @@ func (d *driver) DetachNetworkAdapter(name string) error {
 }
 
 func (d *driver) GetVolumeIdentifiers() ([]DiskIdentifier, error) {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (d *driver) SetVolumes(volumes []Volume) error {
 	//TODO implement me
 	panic("implement me")
 }
