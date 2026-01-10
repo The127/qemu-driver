@@ -1,4 +1,8 @@
-package driver
+package machineconfig
+
+type Volume interface {
+	__volumeMarker()
+}
 
 type cephVolume struct {
 	Serial string

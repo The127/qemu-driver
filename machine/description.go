@@ -45,15 +45,8 @@ func (d *Description) Memory(sizeMB int, maxSizeMB int) {
 	}
 }
 
-func (d *Description) Monitor(path string) {
-	d.monitorChardev = "monitor"
-
-	d.AddChardev(chardev.NewSocket(d.monitorChardev, chardev.SocketOpts{
-		Unix: chardev.SocketOptsUnix{
-			Path: path,
-		},
-		Server: true,
-	}))
+func (d *Description) Monitor(chardevId string) {
+	d.monitorChardev = chardevId
 }
 
 func (d *Description) AddChardev(device chardev.Chardev) {
@@ -85,7 +78,7 @@ func (d *Description) Serial() pcie.SerialBus {
 	return d.serial
 }
 
-func addBaseConfig(cfg *config.MachineConfig) {
+func addBaseConfig(cfg *config.Builder) {
 	cfg.AddSection(config.Section{
 		Name: "machine",
 		Entries: map[string]string{
@@ -124,14 +117,15 @@ func addBaseConfig(cfg *config.MachineConfig) {
 	})
 }
 
-func (d *Description) BuildConfig() (config.MachineConfig, []devices.HotplugDevice) {
-	cfg := config.MachineConfig{}
+func (d *Description) BuildConfig() (config.Builder, []devices.HotplugDevice) {
+	cfg := config.Builder{}
 	var hotplugDevices []devices.HotplugDevice
 
 	addBaseConfig(&cfg)
 
 	if d.memory != (memoryConfig{}) {
 		cfg.AddSection(d.memory.Config())
+		hotplugDevices = append(hotplugDevices, d.memory.GetHotplugs()...)
 	}
 
 	if d.cpu != (cpuConfig{}) {

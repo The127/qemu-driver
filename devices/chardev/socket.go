@@ -35,7 +35,7 @@ type SocketOptsTcp struct {
 
 type SocketOptsUnix struct {
 	Path string
-	Fd   int
+	Fd   int // TODO: this should probably be a separate thing from unix
 }
 
 func NewSocket(id string, opts SocketOpts) Chardev {

@@ -1,36 +1,31 @@
 package driver
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/kdomanski/iso9660"
 )
 
-type MachineConfiguration struct {
-	Id                 uuid.UUID
-	StorageDirectory   string
-	RuntimeDirectory   string
-	ImageSourcePath    string
-	FirmwareSourcePath string
-	NvramSourcePath    string
-	CpuCount           uint32
-	MemorySize         uint64
-	DiskSize           uint64
-	NetworkInterfaces  []NetworkInterface
-	Volumes            []Volume
-	VsockCid           uint32
-	CloudInit          CloudInitData
+func (m *MachineConfiguration) UnmarshalJSON(bytes []byte) error {
+	var data map[string]any
+	err := json.Unmarshal(bytes, &data)
+	if err != nil {
+		return err
+	}
+
+	var ok bool
+
+	m.FirmwareSourcePath, ok = data["firmware-source-path"]
+
 }
 
-type CloudInitData struct {
-	Vendor  string
-	Meta    string
-	User    string
-	Network string
+type networkInterfaceConfig struct {
+	Type string
+	Tap  *tapNetworkInterface
 }
 
 func (d *CloudInitData) CreateIso(path string) error {

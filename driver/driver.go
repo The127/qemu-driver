@@ -1,8 +1,11 @@
 package driver
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -11,70 +14,85 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
+
+	"github.com/google/uuid"
+	"github.com/gwenya/qemu-driver/pidfd"
+	"github.com/kdomanski/iso9660"
+	"golang.org/x/sys/unix"
 
 	"github.com/gwenya/qemu-driver/cmdBuilder"
-	"github.com/gwenya/qemu-driver/devices"
 	"github.com/gwenya/qemu-driver/devices/chardev"
 	"github.com/gwenya/qemu-driver/devices/pcie"
 	"github.com/gwenya/qemu-driver/devices/storage"
 	"github.com/gwenya/qemu-driver/machine"
 	"github.com/gwenya/qemu-driver/qmp"
 	"github.com/gwenya/qemu-driver/util"
-
-	"github.com/google/uuid"
-	"golang.org/x/sys/unix"
-)
-
-type StorageFilename string
-type RuntimeFilename string
-
-const (
-	QemuPidFileName     StorageFilename = "qemu.pid"
-	RootDiskFileName    StorageFilename = "rootdisk.img"
-	ConfigFileName      StorageFilename = "qemu.conf"
-	QemuStdErrFileName  StorageFilename = "stderr.log"
-	QemuStdOutFileName  StorageFilename = "stdout.log"
-	FirmwareFileName    StorageFilename = "firmware.fd"
-	NvramFileName       StorageFilename = "nvram.fd"
-	CloudInitIsoFile    StorageFilename = "cloud-init.iso"
-	CreatedFlagFileName StorageFilename = "created"
-)
-
-const (
-	QemuQmpSocketFileName RuntimeFilename = "qmp.sock"
-	ConsoleSocketFileName RuntimeFilename = "console.sock"
 )
 
 type Driver interface {
-	Create() error
-	Start() error
+	Create(config CreateOptions) error
+	Start(config StartOptions) error
 	Stop() error
 	Reboot() error
-	GetState() Status
-	Scale(cpuCount uint32, memory uint64, disk uint64) error
-	AttachNetworkInterface(net NetworkInterface) error
-	DetachNetworkInterface(id uuid.UUID) error
+	GetStatus() Status
+
+	GetCPUs() (uint32, error)
+	SetCPUs(count uint32) error
+
+	GetMemory() (uint64, error)
+	SetMemory(bytes uint64) error
+
+	GetNetworkAdapterNames() ([]string, error)
+	SetNetworkAdapters(networks []NetworkAdapter) error
+	AttachNetworkAdapter(adapter NetworkAdapter) error
+	DetachNetworkAdapter(name string) error
+
+	GetVolumeIdentifiers() ([]DiskIdentifier, error)
+	SetVolumes(volumes []Volume) error
 	AttachVolume(volume Volume) error
-	DetachVolume(id uuid.UUID) error
+	DetachVolume(id DiskIdentifier) error
+
+	io.Closer
 }
 
 type driver struct {
-	config    MachineConfiguration
-	qemuPath  string
-	mu        sync.Mutex
-	qemuPidFd int
-	mon       qmp.Monitor
+	logger           Logger
+	qemuPath         string
+	systemId         uuid.UUID
+	storageDirectory string
+	runtimeDirectory string
+
+	mu               sync.Mutex
+	qemuPidFd        int
+	pidfdWaiter      pidfd.Waiter
+	pidfdWaiterOwned bool
+	mon              qmp.Monitor
+	cancelWatcher    context.CancelFunc
 }
 
-func New(qemuPath string, config MachineConfiguration) (Driver, error) {
+func New(opts Options) (Driver, error) {
+	pidfdWaiter := opts.PidFdWaiter
+	pidfdWaiterOwned := false
+	if pidfdWaiter == nil {
+		pidfdWaiterOwned = true
+		var err error
+		pidfdWaiter, err = pidfd.NewWaiter()
+		if err != nil {
+			return nil, fmt.Errorf("creating pidfd waiter: %w", err)
+		}
+	}
 	d := &driver{
-		config:    config,
-		qemuPath:  qemuPath,
-		qemuPidFd: -1,
+		systemId:         opts.SystemId,
+		qemuPath:         opts.QemuPath,
+		logger:           opts.Logger,
+		qemuPidFd:        -1,
+		storageDirectory: opts.StorageDirectory,
+		runtimeDirectory: opts.RuntimeDirectory,
+		pidfdWaiter:      pidfdWaiter,
+		pidfdWaiterOwned: pidfdWaiterOwned,
 	}
 
-	pidFilePath := d.storagePath(QemuPidFileName)
+	pidFilePath := d.runtimePath(QemuPidFileName)
 	pidFileBytes, err := os.ReadFile(pidFilePath)
 	if os.IsNotExist(err) {
 		return d, nil
@@ -88,7 +106,6 @@ func New(qemuPath string, config MachineConfiguration) (Driver, error) {
 	}
 
 	pid := int(pidInt64)
-
 	pidfd, err := unix.PidfdOpen(pid, unix.PIDFD_NONBLOCK)
 	if errors.Is(err, unix.ESRCH) {
 		err := os.Remove(pidFilePath)
@@ -101,36 +118,23 @@ func New(qemuPath string, config MachineConfiguration) (Driver, error) {
 		return nil, fmt.Errorf("failed to open process handle for pid %d: %w", pid, err)
 	}
 
-	cmdlineBytes, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	cmdline, err := util.GetCmdline(pid)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read cmdline for pid %d: %w", pid, err)
+		return nil, fmt.Errorf("getting cmdline of running process: %w", err)
 	}
 
-	cmdline := string(cmdlineBytes)
-
-	if !strings.Contains(cmdline, config.Id.String()) {
+	// TODO: this feels very brittle, maybe instead/first make an attempt to connect to the monitor?
+	if len(cmdline) < 3 || cmdline[0] != d.qemuPath || cmdline[1] != "-uuid" || cmdline[2] != d.systemId.String() {
 		err := os.Remove(pidFilePath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to remove old pid file %q: %w", pidFilePath, err)
 		}
 
 		return d, nil
-	}
-
-	// check if the process is still running, to prevent TOCTOU on the cmdline compare
-	err = unix.PidfdSendSignal(pidfd, unix.Signal(0), nil, 0)
-	if errors.Is(err, unix.ENOENT) {
-		err := os.Remove(pidFilePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to remove old pid file %q: %w", pidFilePath, err)
-		}
-
-		return d, nil
-	} else if err != nil {
-		return nil, fmt.Errorf("failed to signal qemu process: %w", err)
 	}
 
 	d.qemuPidFd = pidfd
+
 	err = d.startWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("creating qemu process watcher: %w", err)
@@ -139,119 +143,127 @@ func New(qemuPath string, config MachineConfiguration) (Driver, error) {
 	return d, nil
 }
 
+func (d *driver) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.cancelWatcher != nil {
+		d.cancelWatcher()
+	}
+
+	var errs []error
+
+	if d.qemuPidFd != -1 {
+		err := d.pidfdWaiter.Remove(d.qemuPidFd)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if d.pidfdWaiterOwned {
+		err := d.pidfdWaiter.Close()
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+
+	return nil
+}
+
 func (d *driver) startWatcher() error {
-	pidfd := d.qemuPidFd
-
-	epfd, err := syscall.EpollCreate(1)
+	done, err := d.pidfdWaiter.Add(d.qemuPidFd)
 	if err != nil {
-		return fmt.Errorf("creating epoll: %w", err)
+		return fmt.Errorf("adding qemu pidfd to waiter: %w", err)
 	}
 
-	err = syscall.EpollCtl(epfd, syscall.EPOLL_CTL_ADD, pidfd, &syscall.EpollEvent{
-		Events: syscall.EPOLLIN,
-	})
-	if err != nil {
-		return fmt.Errorf("configuring epoll: %w", err)
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d.cancelWatcher = cancel
 
 	go func() {
-		events := make([]syscall.EpollEvent, 1)
-
-		for {
-			ready, err := syscall.EpollWait(epfd, events, 1000)
-			if err != nil {
-				fmt.Printf("epoll_wait failed: %v", err) // TODO: use logger
-				time.Sleep(time.Second * 1000)
-			}
-
-			if ready > 0 {
-				break
-			}
+		select {
+		case <-done:
+		case <-ctx.Done():
 		}
 
 		d.mu.Lock()
-		d.qemuPidFd = -1
+		defer d.mu.Unlock()
+
 		if d.mon != nil {
 			err := d.mon.Disconnect()
 			if err != nil {
-				fmt.Printf("warning: closing qmp socket failed: %v\n", err)
+				d.logger.Logf("closing qmp socket failed: %v\n", err)
 			}
-			d.mon = nil
 		}
-		d.signalExit()
-		defer d.mu.Unlock()
+
+		err := syscall.Close(d.qemuPidFd)
+		if err != nil {
+			d.logger.Logf("failed to close pidfd: %v", err)
+		}
+
+		d.mon = nil
+		d.qemuPidFd = -1
+		d.cancelWatcher = nil
+
+		if ctx.Err() == nil {
+			d.onQemuProcessExit()
+		}
 	}()
 
 	return nil
 }
 
-func (d *driver) signalExit() {
-
+func (d *driver) onQemuProcessExit() {
+	d.logger.Logf("qemu process stopped")
 }
 
-// Create copies over the rootdisk from the image specified in the configuration, as well as the firmware and nvram files
-// This operation effectively destroys any existing root disk and resets the nvram.
-func (d *driver) Create() error {
-	if d.qemuPidFd != -1 {
-		return fmt.Errorf("VM is running")
-	}
+func (d *driver) storagePath(name StorageFilename) string {
+	return path.Join(d.storageDirectory, string(name))
+}
 
+func (d *driver) runtimePath(name RuntimeFilename) string {
+	return path.Join(d.runtimeDirectory, string(name))
+}
+
+func (d *driver) createRootDisk(sourcePath string, sourceFormat string) error {
 	rootDiskPath := d.storagePath(RootDiskFileName)
 	err := util.RemoveIfExists(rootDiskPath)
 	if err != nil {
 		return fmt.Errorf("deleting existing root disk: %w", err)
 	}
 
-	cmd := exec.Command("qemu-img", "convert", "-f", "qcow2", "-O", "raw", d.config.ImageSourcePath, rootDiskPath)
+	args := []string{"convert"}
+
+	if sourceFormat != "" {
+		args = append(args, "-f", sourceFormat)
+	}
+
+	args = append(args, "-O", "raw", sourcePath, rootDiskPath)
+
+	cmd := exec.Command("qemu-img", args...)
 	err = cmd.Run()
 	if err != nil {
 		return fmt.Errorf("converting image (%s): %w", cmd, err)
 	}
 
-	var diskKiB uint64
+	return nil
+}
 
-	if d.config.DiskSize%4096 != 0 {
-		diskKiB = ((d.config.DiskSize / 4096) + 1) * 4
-	} else {
-		diskKiB = d.config.DiskSize / 1024
+func (d *driver) Create(opts CreateOptions) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// we specifically check for the pidfd here rather than using GetStatus() because it matters
+	// whether the qemu process is running, not whether the VM is in a running state.
+	if d.qemuPidFd != -1 {
+		return fmt.Errorf("qemu process is running")
 	}
 
-	cmd = exec.Command("qemu-img", "resize", "-f", "raw", rootDiskPath, fmt.Sprintf("%dK", diskKiB))
-	err = cmd.Run()
+	err := d.createRootDisk(opts.ImageSourcePath, opts.ImageSourceFormat)
 	if err != nil {
-		return fmt.Errorf("resizing image (%s): %w", cmd, err)
-	}
-
-	firmwarePath := d.storagePath(FirmwareFileName)
-	err = util.RemoveIfExists(firmwarePath)
-	if err != nil {
-		return fmt.Errorf("deleting existing firmware file: %w", err)
-	}
-
-	err = util.CopyFile(d.config.FirmwareSourcePath, firmwarePath)
-	if err != nil {
-		return fmt.Errorf("copying firmware file: %w", err)
-	}
-
-	nvramPath := d.storagePath(NvramFileName)
-	err = util.RemoveIfExists(nvramPath)
-
-	if err != nil {
-		return fmt.Errorf("deleting existing nvram file: %w", err)
-	}
-
-	err = util.CopyFile(d.config.NvramSourcePath, nvramPath)
-	if err != nil {
-		return fmt.Errorf("copying firmware file: %w", err)
-	}
-
-	fmt.Printf("cloud init: %v", d.config.CloudInit)
-	if (d.config.CloudInit != CloudInitData{}) {
-		fmt.Printf("creating cloud init volume")
-		err := d.config.CloudInit.CreateIso(d.storagePath(CloudInitIsoFile))
-		if err != nil {
-			return fmt.Errorf("creating cloud init iso: %w", err)
-		}
+		return fmt.Errorf("creating root disk: %w", err)
 	}
 
 	err = os.WriteFile(d.storagePath(CreatedFlagFileName), make([]byte, 0), 0o644)
@@ -262,11 +274,11 @@ func (d *driver) Create() error {
 	return nil
 }
 
-func (d *driver) Start() error {
+func (d *driver) Start(opts StartOptions) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.qemuPidFd != -1 {
+	if d.getStatus() == Running {
 		return fmt.Errorf("VM is already running")
 	}
 
@@ -275,22 +287,6 @@ func (d *driver) Start() error {
 	if err != nil {
 		return fmt.Errorf("removing old config file: %w", err)
 	}
-
-	builder := cmdBuilder.New(d.qemuPath)
-	defer builder.CloseFds()
-
-	builder.AddArgs(
-		"-S",
-		"-uuid", d.config.Id.String(),
-		"-nographic",
-		//"-display", "gtk",
-		"-nodefaults",
-		"-no-user-config",
-		"-serial", "chardev:console",
-		"-readconfig", configFilePath,
-		"-machine", "q35",
-		"-pidfile", d.storagePath(QemuPidFileName),
-	)
 
 	err = util.RemoveIfExists(d.runtimePath(QemuQmpSocketFileName))
 	if err != nil {
@@ -302,19 +298,58 @@ func (d *driver) Start() error {
 		return fmt.Errorf("removing old console socket: %w", err)
 	}
 
+	err = util.RemoveIfExists(d.runtimePath(QemuPidFileName))
+	if err != nil {
+		return fmt.Errorf("removing old pid file: %w", err)
+	}
+
+	if opts.DiskSize != 0 {
+		err := d.resizeRootdisk(opts.DiskSize)
+		if err != nil {
+			return fmt.Errorf("resizing rootdisk: %w", err)
+		}
+	}
+
+	builder := cmdBuilder.New(d.qemuPath)
+	defer builder.CloseFds()
+
+	builder.AddArgs(
+		"-uuid", d.systemId.String(),
+		"-S",
+		"-nographic",
+		//"-display", "gtk",
+		"-nodefaults",
+		"-no-user-config",
+		"-serial", "chardev:console",
+		"-readconfig", configFilePath,
+		"-machine", "q35",
+		"-pidfile", d.runtimePath(QemuPidFileName),
+	)
+
 	desc := machine.Description{}
 
-	desc.Cpu(1, int(d.config.CpuCount), int(d.config.CpuCount))
+	desc.Cpu(1, opts.CpuCount, opts.CpuCount)
 
-	memoryMiB := int(d.config.MemorySize / 1024 / 1024)
+	memoryMiB := int(opts.MemorySize / 1024 / 1024)
 
-	if d.config.MemorySize%(1024*1024) != 0 {
+	if opts.MemorySize%(1024*1024) != 0 {
 		memoryMiB += 1
 	}
 
 	desc.Memory(memoryMiB, 64*1024) // TODO: configurable max size
 
-	desc.Monitor(d.runtimePath(QemuQmpSocketFileName))
+	monitorSocketFile, err := d.makeUnixListener(d.runtimePath(QemuQmpSocketFileName))
+	if err != nil {
+		return fmt.Errorf("creating monitor socket: %w", err)
+	}
+
+	desc.AddChardev(chardev.NewSocket("monitor", chardev.SocketOpts{
+		Unix: chardev.SocketOptsUnix{
+			Fd: builder.AddFd(monitorSocketFile),
+		},
+		Server: true,
+	}))
+	desc.Monitor("monitor")
 
 	desc.Pcie().AddDevice(pcie.NewBalloon("balloon"))
 	desc.Pcie().AddDevice(pcie.NewKeyboard("keyboard"))
@@ -323,20 +358,9 @@ func (d *driver) Start() error {
 
 	desc.AddChardev(chardev.NewRingbuf("console-ringbuf", 4096))
 
-	consoleSocketListener, err := net.Listen("unix", d.runtimePath(ConsoleSocketFileName))
+	consoleSocketFile, err := d.makeUnixListener(d.runtimePath(ConsoleSocketFileName))
 	if err != nil {
-		return fmt.Errorf("creating listener for console socket: %w", err)
-	}
-
-	err = os.Chmod(d.runtimePath(ConsoleSocketFileName), 0777)
-	if err != nil {
-		_ = consoleSocketListener.Close()
-		return fmt.Errorf("changing permissions on console socket path: %w", err)
-	}
-
-	consoleSocketFile, err := consoleSocketListener.(*net.UnixListener).File()
-	if err != nil {
-		return fmt.Errorf("getting fd from console socket listener: %w", err)
+		return fmt.Errorf("creating console socket: %w", err)
 	}
 
 	desc.AddChardev(chardev.NewSocket("console-socket", chardev.SocketOpts{
@@ -351,45 +375,52 @@ func (d *driver) Start() error {
 
 	desc.Scsi().AddDisk(storage.NewImageDrive("rootdisk", d.storagePath(RootDiskFileName)))
 
-	if (d.config.CloudInit != CloudInitData{}) {
+	if (opts.CloudInit != CloudInit{}) {
+		err := d.generateCloudInitIso(opts.CloudInit)
+		if err != nil {
+			return fmt.Errorf("generating cloud-init iso: %w", err)
+		}
+
 		desc.Scsi().AddDisk(storage.NewCdromDrive("cloud-init-cidata", d.storagePath(CloudInitIsoFile)))
 	}
 
-	for _, volume := range d.config.Volumes {
-		switch v := volume.(type) {
-		case cephVolume:
-			if len(v.Serial) > 20 {
-				return fmt.Errorf("serial %q is too long", v.Serial)
-			}
-			desc.Scsi().AddDisk(storage.NewRbdDrive(v.Serial, v.Pool, v.Name))
+	for _, volume := range opts.Volumes {
+		switch opts := volume.options.(type) {
+		case cephVolumeOpts:
+			// TODO: pass vendor and model, and more rbd options
+			desc.Scsi().AddDisk(storage.NewRbdDrive(volume.id.Serial, opts.pool, opts.name))
 		default:
 			panic("not implemented")
 		}
 	}
 
-	for _, networkInterface := range d.config.NetworkInterfaces {
-		switch n := networkInterface.(type) {
-		case tapNetworkInterface:
-			desc.Pcie().AddDevice(pcie.NewTapNetworkDevice("tap-"+n.name, n.name, n.macAddress))
-		case physicalNetworkInterface:
-			panic("not supported")
-			//desc.Pcie().AddDevice(pcie.NewPhysicalNetworkDevice("phys-"+n.Id.String(), n.Name))
+	for _, networkAdapter := range opts.NetworkAdapters {
+		switch opts := networkAdapter.options.(type) {
+		case tapNetworkAdapterOptions:
+			desc.Pcie().AddDevice(pcie.NewTapNetworkDevice("tap-"+networkAdapter.name, networkAdapter.name, opts.macAddress))
+		default:
+			panic("not implemented")
 		}
 	}
 
-	if d.config.VsockCid != 0 {
-		vsockFile, err := openVsock(d.config.VsockCid)
+	if opts.VsockCid != 0 {
+		vsockFile, err := openVsock(opts.VsockCid)
 		if err != nil {
-			return fmt.Errorf("allocating vsock cid %d: %w", d.config.VsockCid, err)
+			return fmt.Errorf("allocating vsock cid %d: %w", opts.VsockCid, err)
 		}
 
 		vsockFd := builder.AddFd(vsockFile)
-		desc.Pcie().AddDevice(pcie.NewVsock("vsock", d.config.VsockCid, vsockFd))
+		desc.Pcie().AddDevice(pcie.NewVsock("vsock", opts.VsockCid, vsockFd))
 	}
 
 	config, hotplugDevices := desc.BuildConfig()
 
-	err = os.WriteFile(configFilePath, []byte(config.ToString()), 0o644)
+	configFile, err := os.Create(configFilePath)
+	if err != nil {
+		return fmt.Errorf("creating config file: %w", err)
+	}
+
+	_, err = config.WriteTo(configFile)
 	if err != nil {
 		return fmt.Errorf("writing config file: %w", err)
 	}
@@ -431,15 +462,6 @@ func (d *driver) Start() error {
 		return fmt.Errorf("starting qemu process watcher: %w", err)
 	}
 
-	_, err = d.connectMonitor()
-	if err != nil {
-		return err
-	}
-
-	return d.postStartConfig(hotplugDevices)
-}
-
-func (d *driver) postStartConfig(devices []devices.HotplugDevice) error {
 	mon, err := d.connectMonitor()
 	if err != nil {
 		return err
@@ -447,7 +469,7 @@ func (d *driver) postStartConfig(devices []devices.HotplugDevice) error {
 
 	var hotplugErrors []error
 
-	for _, device := range devices {
+	for _, device := range hotplugDevices {
 		err := device.Plug(mon)
 		if err != nil {
 			hotplugErrors = append(hotplugErrors, err)
@@ -460,10 +482,30 @@ func (d *driver) postStartConfig(devices []devices.HotplugDevice) error {
 
 	err = mon.Continue()
 	if err != nil {
-		return fmt.Errorf("resuming VM execution: %w", err)
+		return fmt.Errorf("starting VM execution: %w", err)
 	}
 
 	return nil
+}
+
+func (d *driver) makeUnixListener(path string) (*os.File, error) {
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, fmt.Errorf("creating listener: %w", err)
+	}
+
+	err = os.Chmod(path, 0777)
+	if err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("changing permissions on socket path: %w", err)
+	}
+
+	socketFile, err := listener.(*net.UnixListener).File()
+	if err != nil {
+		return nil, fmt.Errorf("getting fd from listener: %w", err)
+	}
+
+	return socketFile, nil
 }
 
 func (d *driver) connectMonitor() (qmp.Monitor, error) {
@@ -473,37 +515,127 @@ func (d *driver) connectMonitor() (qmp.Monitor, error) {
 			return d.mon, nil
 		}
 
-		fmt.Println("connection to qmp socket is broken, reconnecting")
+		d.logger.Logf("connection to qmp socket is broken, reconnecting")
 		_ = d.mon.Disconnect()
 	}
 
-	var mon qmp.Monitor
-	var err error
-
-	for {
-		mon, err = qmp.Connect(d.runtimePath(QemuQmpSocketFileName))
-		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ECONNREFUSED) {
-			fmt.Println("qmp socket is not ready yet, retrying in a second")
-			time.Sleep(time.Second * 1)
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("connecting to qmp monitor: %w", err)
-		}
-
-		break
+	mon, err := qmp.Connect(d.runtimePath(QemuQmpSocketFileName))
+	if err != nil {
+		return nil, fmt.Errorf("connecting to qmp monitor: %w", err)
 	}
 
 	d.mon = mon
 	return mon, nil
 }
 
-func (d *driver) storagePath(name StorageFilename) string {
-	return path.Join(d.config.StorageDirectory, string(name))
+func (d *driver) generateCloudInitIso(cidata CloudInit) error {
+	hash := cidata.Hash()
+	hashFilePath := d.storagePath(CloudInitHashFile)
+
+	exists, err := util.FileExists(hashFilePath)
+	if err != nil {
+		return fmt.Errorf("checking cloud init hash file: %w", err)
+	}
+
+	if exists {
+		oldHash, err := os.ReadFile(hashFilePath)
+		if err != nil {
+			return fmt.Errorf("reading cloud init hash file: %w", err)
+		}
+
+		if string(oldHash) == hash {
+			return nil
+		}
+	}
+
+	writer, err := iso9660.NewWriter()
+	if err != nil {
+		return fmt.Errorf("creating iso writer: %w", err)
+	}
+
+	defer func() {
+		err := writer.Cleanup()
+		if err != nil {
+			d.logger.Logf("failed to clean up iso writer: %v", err)
+		}
+	}()
+
+	err = writer.AddFile(strings.NewReader(cidata.Meta), "meta-data")
+	if err != nil {
+		return fmt.Errorf("adding meta-data: %w", err)
+	}
+
+	err = writer.AddFile(strings.NewReader(cidata.User), "user-data")
+	if err != nil {
+		return fmt.Errorf("adding user-data: %w", err)
+	}
+
+	if cidata.Network != "" {
+		err = writer.AddFile(strings.NewReader(cidata.Network), "network-config")
+		if err != nil {
+			return fmt.Errorf("adding network-config: %w", err)
+		}
+	}
+
+	if cidata.Vendor != "" {
+		err = writer.AddFile(strings.NewReader(cidata.Vendor), "vendor-data")
+		if err != nil {
+			return fmt.Errorf("adding vendor-data: %w", err)
+		}
+	}
+
+	isoFile, err := os.OpenFile(d.storagePath(CloudInitIsoFile), os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0600)
+	if err != nil {
+		log.Fatalf("failed to create file: %s", err)
+	}
+	defer func() {
+		err := isoFile.Close()
+		if err != nil {
+			d.logger.Logf("failed to close iso file: %v", err)
+		}
+	}()
+
+	err = writer.WriteTo(isoFile, "cidata")
+	if err != nil {
+		return fmt.Errorf("writing iso file: %w", err)
+	}
+
+	err = os.WriteFile(hashFilePath, []byte(hash), 0600)
+	if err != nil {
+		return fmt.Errorf("writing cloud init hash file: %w", err)
+	}
+
+	return nil
+
 }
 
-func (d *driver) runtimePath(name RuntimeFilename) string {
-	return path.Join(d.config.RuntimeDirectory, string(name))
+func (d *driver) resizeRootdisk(size uint64) error {
+	stat, err := os.Stat(d.storagePath(RootDiskFileName))
+	if err != nil {
+		return fmt.Errorf("stat %q: %w", d.storagePath(RootDiskFileName), err)
+	}
+
+	desiredSize := size
+
+	if size%4096 != 0 {
+		desiredSize = ((size / 4096) + 1) * 4096
+	}
+
+	currentSize := uint64(stat.Size())
+
+	if currentSize == desiredSize {
+		return nil
+	}
+
+	sizeKiB := desiredSize / 1024
+
+	cmd := exec.Command("qemu-img", "resize", "-f", "raw", d.storagePath(RootDiskFileName), fmt.Sprintf("%dK", sizeKiB))
+	err = cmd.Run()
+	if err != nil {
+		return fmt.Errorf("resizing image (%s): %w", cmd, err)
+	}
+
+	return nil
 }
 
 func (d *driver) Stop() error {
@@ -521,7 +653,7 @@ func (d *driver) Stop() error {
 
 	err = d.mon.Disconnect()
 	if err != nil {
-		fmt.Printf("closing qmp: %w", err)
+		d.logger.Logf("failed to close qmp: %v", err)
 	}
 
 	d.mon = nil
@@ -534,40 +666,12 @@ func (d *driver) Reboot() error {
 	panic("implement me")
 }
 
-func (d *driver) Scale(cpuCount uint32, memory uint64, disk uint64) error {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (d *driver) AttachNetworkInterface(net NetworkInterface) error {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (d *driver) DetachNetworkInterface(id uuid.UUID) error {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (d *driver) AttachVolume(volume Volume) error {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (d *driver) DetachVolume(id uuid.UUID) error {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (d *driver) GetState() Status {
+func (d *driver) getStatus() Status {
 	// TODO: proper state logic for starting, stopping and restarting states
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	if d.qemuPidFd == -1 {
 		isCreated, err := util.FileExists(d.storagePath(CreatedFlagFileName))
 		if err != nil {
-			fmt.Printf("failed to check creation flag existence: %v\n", err)
+			d.logger.Logf("failed to check creation flag existence: %v\n", err)
 			return Unknown
 		}
 
@@ -580,15 +684,139 @@ func (d *driver) GetState() Status {
 
 	mon, err := d.connectMonitor()
 	if err != nil {
-		fmt.Printf("failed to connect qmp monitor: %v\n", err)
+		d.logger.Logf("failed to connect qmp monitor: %v\n", err)
 		return Unknown
 	}
 
 	qemuStatus, err := mon.Status()
 	if err != nil {
-		fmt.Printf("failed to query qemu status: %v\n", err)
+		d.logger.Logf("failed to query qemu status: %v\n", err)
 		return Unknown
 	}
 
 	return mapQemuStatus(qemuStatus)
+}
+
+func (d *driver) GetStatus() Status {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.getStatus()
+}
+
+func (d *driver) GetCPUs() (uint32, error) {
+	mon, err := d.connectMonitor()
+	if err != nil {
+		return 0, err
+	}
+
+	cpus, err := mon.QueryCPUs()
+	if err != nil {
+		return 0, err
+	}
+
+	return uint32(len(cpus)), nil
+}
+
+func (d *driver) SetCPUs(count uint32) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (d *driver) GetMemory() (uint64, error) {
+	mon, err := d.connectMonitor()
+	if err != nil {
+		return 0, err
+	}
+
+	memory, err := mon.QueryMemorySummary()
+	if err != nil {
+		return 0, err
+	}
+
+	return memory.Base + memory.Hotplugged, nil
+}
+
+func (d *driver) SetMemory(bytes uint64) error {
+	mon, err := d.connectMonitor()
+	if err != nil {
+		return err
+	}
+
+	memory, err := mon.QueryMemorySummary()
+	if err != nil {
+		return err
+	}
+
+	total := memory.Base + memory.Hotplugged
+	if bytes == total {
+		return nil
+	}
+
+	if bytes < total {
+		return errors.New("restart required")
+	}
+
+	err = mon.AddMemoryBackend("mem1", bytes-total)
+	if err != nil {
+		return err
+	}
+
+	err = mon.AddDevice(map[string]any{
+		"driver": "pc-dimm",
+		"memdev": "mem1",
+		"id":     "dimm1",
+	})
+	if err != nil {
+		return err
+	}
+
+	devices, err := mon.QueryMemoryDevices()
+	if err != nil {
+		return err
+	}
+
+	d.logger.Logf("memory devices: %+v", devices)
+
+	return nil
+}
+
+func (d *driver) GetNetworkAdapterNames() ([]string, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (d *driver) SetNetworkAdapters(networks []NetworkAdapter) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (d *driver) AttachNetworkAdapter(adapter NetworkAdapter) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (d *driver) DetachNetworkAdapter(name string) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (d *driver) GetVolumeIdentifiers() ([]DiskIdentifier, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (d *driver) SetVolumes(volumes []Volume) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (d *driver) AttachVolume(volume Volume) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (d *driver) DetachVolume(id DiskIdentifier) error {
+	//TODO implement me
+	panic("implement me")
 }

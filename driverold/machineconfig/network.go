@@ -1,8 +1,6 @@
-package driver
+package machineconfig
 
-import (
-	"net"
-)
+import "net"
 
 type NetworkInterface interface {
 	__networkInterfaceMarker()
@@ -26,3 +24,7 @@ type physicalNetworkInterface struct {
 }
 
 func (physicalNetworkInterface) __networkInterfaceMarker() {}
+
+func NewPhysicalNetworkInterface() NetworkInterface {
+	return physicalNetworkInterface{}
+}

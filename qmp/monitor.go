@@ -18,6 +18,9 @@ type Monitor interface {
 	Disconnect() error
 	Status() (RunState, error)
 	QueryCPUs() ([]CpuInfo, error)
+	QueryMemorySummary() (MemorySummary, error)
+	QueryMemoryDevices() ([]MemoryDevice, error)
+	AddMemoryBackend(id string, size uint64) error
 	SendFd(name string, fd *os.File) error
 	CloseFd(name string) error
 }
@@ -139,11 +142,9 @@ func (m *monitor) Disconnect() error {
 }
 
 func (m *monitor) Status() (RunState, error) {
-	var resp struct {
-		Return struct {
-			Status RunState `json:"status"`
-		} `json:"return"`
-	}
+	var resp Response[struct {
+		Status RunState `json:"status"`
+	}]
 
 	err := m.runCommandsWithResponse("query-status", nil, &resp)
 	if err != nil {
@@ -154,9 +155,7 @@ func (m *monitor) Status() (RunState, error) {
 }
 
 func (m *monitor) QueryCPUs() ([]CpuInfo, error) {
-	var resp struct {
-		Return []CpuInfo
-	}
+	var resp Response[[]CpuInfo]
 
 	err := m.runCommandsWithResponse("query-cpus-fast", nil, &resp)
 	if err != nil {
@@ -164,6 +163,41 @@ func (m *monitor) QueryCPUs() ([]CpuInfo, error) {
 	}
 
 	return resp.Return, nil
+}
+
+func (m *monitor) QueryMemorySummary() (MemorySummary, error) {
+	var resp Response[MemorySummary]
+
+	err := m.runCommandsWithResponse("query-memory-size-summary", nil, &resp)
+	if err != nil {
+		return MemorySummary{}, err
+	}
+
+	return resp.Return, nil
+}
+
+func (m *monitor) QueryMemoryDevices() ([]MemoryDevice, error) {
+	var resp Response[[]MemoryDevice]
+
+	err := m.runCommandsWithResponse("query-memory-devices", nil, &resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Return, nil
+}
+
+func (m *monitor) AddMemoryBackend(id string, size uint64) error {
+	err := m.runCommand("object-add", map[string]any{
+		"id":       id,
+		"qom-type": "memory-backend-ram",
+		"size":     size,
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (m *monitor) SendFd(name string, fd *os.File) error {
