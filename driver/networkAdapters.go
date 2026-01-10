@@ -7,6 +7,10 @@ type NetworkAdapter struct {
 	options any
 }
 
+func (n *NetworkAdapter) Name() string {
+	return n.name
+}
+
 type tapNetworkAdapterOptions struct {
 	macAddress net.HardwareAddr
 }

@@ -5,6 +5,10 @@ type Volume struct {
 	options any
 }
 
+func (v *Volume) Id() DiskIdentifier {
+	return v.id
+}
+
 type cephVolumeOpts struct {
 	pool string
 	name string
